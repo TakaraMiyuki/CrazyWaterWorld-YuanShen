@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "open=false": {
+      "model": "barotrauma:block/hatch"
+    },
+    "open=true": {
+      "model": "barotrauma:block/hatch"
+    }
+  }
+}

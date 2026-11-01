@@ -1,0 +1,10 @@
+{
+  "type": "barotrauma:the_deep",
+  "generator": {
+    "type": "barotrauma:deep_sea",
+    "biome_source": {
+      "type": "minecraft:fixed",
+      "biome": "barotrauma:abyss"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+
+# 客户端/服务端运行目录（含日志、地图存档、配置）
+run/
+runs/
+logs/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+.classpath
+.project
+.settings/
+bin/
+.vscode/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 其它
+*.log
+*.bak
+.smoketest

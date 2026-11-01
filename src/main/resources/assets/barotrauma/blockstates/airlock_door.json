@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "open=false": {
+      "model": "barotrauma:block/airlock_door"
+    },
+    "open=true": {
+      "model": "barotrauma:block/airlock_door"
+    }
+  }
+}

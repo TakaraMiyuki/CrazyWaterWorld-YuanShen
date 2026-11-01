@@ -1,0 +1,20 @@
+{
+  "itemGroup.barotrauma": "潜渊症",
+  "item.barotrauma.oxygen_tank": "氧气瓶",
+  "item.barotrauma.diving_knife": "潜水刀",
+  "block.barotrauma.submarine_plating": "潜艇装甲板",
+  "block.barotrauma.hull_glass": "耐压舷窗",
+  "block.barotrauma.hatch": "舱门",
+  "block.barotrauma.airlock_door": "气闸门",
+  "block.barotrauma.nuclear_reactor": "核反应堆",
+  "block.barotrauma.oxygen_generator": "制氧机",
+  "block.barotrauma.engine": "引擎",
+  "block.barotrauma.ballast_tank": "压载舱",
+  "block.barotrauma.pump": "水泵",
+  "block.barotrauma.sonar": "声纳台",
+  "block.barotrauma.helm": "驾驶台",
+  "block.barotrauma.ship_core": "船核心",
+  "block.barotrauma.station_plating": "站点装甲",
+  "tooltip.barotrauma.oxygen_tank": "右键补满氧气",
+  "tooltip.barotrauma.diving_knife": "潜水员标准配发"
+}
