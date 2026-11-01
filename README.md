@@ -21,7 +21,7 @@ Minecraft 1.20.1  |  Forge 47.4.0  |  ForgeGradle 6.0.54  |  Gradle 8.1.1  |  JD
 ## 快速开始
 
 ```powershell
-cd C:\Users\opAmb\Documents\deepseek-harness\default-workspace\barotrauma
+cd barotrauma-mc-mod
 
 # 构建（产物：build/libs/barotrauma-0.1.0.jar）
 .\gradlew.bat build
