@@ -21,9 +21,8 @@ public final class ModBlockEntities {
             BLOCK_ENTITIES.register("sonar",
                     () -> BlockEntityType.Builder.of(SonarBlockEntity::new, ModShipBlocks.SONAR.get()).build(null));
 
-    public static final RegistryObject<BlockEntityType<ShipCoreBlockEntity>> SHIP_CORE =
-            BLOCK_ENTITIES.register("ship_core",
-                    () -> BlockEntityType.Builder.of(ShipCoreBlockEntity::new, ModShipBlocks.SHIP_CORE.get()).build(null));
+    // 船核心方块已经合并进声纳台（SonarBlockEntity extends ShipCoreBlockEntity），
+    // 不再有独立的 ship_core 方块实体。
 
     private ModBlockEntities() {
     }

@@ -21,7 +21,8 @@ public final class ShipWater {
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
 
     /** 一个舱室（或破口空腔）的格子，已按"从底往上"排好序。 */
-    private record Room(List<BlockPos> cells, int volume, int compartmentIndex, boolean openToSea) {
+    private record Room(List<BlockPos> cells, int volume, int compartmentIndex, int pocketIndex,
+                        boolean openToSea) {
     }
 
     private final List<Room> rooms;
@@ -32,10 +33,11 @@ public final class ShipWater {
         this.rooms = new ArrayList<>();
         int index = 0;
         for (ShipGeometry.Compartment compartment : geometry.compartments()) {
-            rooms.add(new Room(sorted(compartment.cells()), compartment.volume(), index++, false));
+            rooms.add(new Room(sorted(compartment.cells()), compartment.volume(), index++, -1, false));
         }
+        int pocketIndex = 0;
         for (ShipGeometry.Compartment pocket : geometry.openPockets()) {
-            rooms.add(new Room(sorted(pocket.cells()), pocket.volume(), -1, true));
+            rooms.add(new Room(sorted(pocket.cells()), pocket.volume(), -1, pocketIndex++, true));
         }
     }
 
@@ -54,7 +56,8 @@ public final class ShipWater {
         for (Room room : rooms) {
             int filled;
             if (room.openToSea) {
-                filled = room.volume;
+                // 破口进水是渐进的（ShipSimulation.tickSeaFlood），不再直接按满水
+                filled = (int) Math.floor(simulation.pocketWater(room.pocketIndex()) / ShipSimulation.UNITS_PER_BLOCK);
             } else {
                 double units = room.compartmentIndex >= 0 ? simulation.waterUnits(room.compartmentIndex) : 0.0D;
                 filled = (int) Math.floor(units / ShipSimulation.UNITS_PER_BLOCK);
@@ -73,6 +76,31 @@ public final class ShipWater {
                     changed++;
                 } else if (!shouldBeWater && state.is(Blocks.WATER)) {
                     level.setBlock(pos, AIR, 3);
+                    changed++;
+                }
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * 把船内所有"我们写进去的水"变回空气。
+     *
+     * <p>只清舱室和连海空腔里的水，船体方块一格不碰。装船前调用，
+     * 免得装配之后原来的位置陷下一坨水。</p>
+     */
+    public int clear(Level level) {
+        return clear(level, 0, 0, 0);
+    }
+
+    /** 带整数位移的版本：拆船时方块铺回的是"原坐标 + 船位移"。 */
+    public int clear(Level level, int dx, int dy, int dz) {
+        int changed = 0;
+        for (Room room : rooms) {
+            for (BlockPos pos : room.cells) {
+                BlockPos target = pos.offset(dx, dy, dz);
+                if (level.getBlockState(target).is(Blocks.WATER)) {
+                    level.setBlock(target, AIR, 3);
                     changed++;
                 }
             }

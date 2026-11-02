@@ -109,6 +109,10 @@ public record ShipActionPacket(BlockPos corePos, int action, int a, int b, int c
                 }
                 default -> BarotraumaMod.LOGGER.warn("[Barotrauma] 未知船控指令 {}", action);
             }
+            // 船已经被收成物理刚体时，把油门/功率/压载立刻同步给 VS2 推进器。
+            // 这是"一套操作面板、一套移动系统"的关键：面板照旧只改 ShipState，
+            // 真正推动船的是哪个系统由 VsState 决定。
+            com.opamb.barotrauma.ship.vs.VsState.syncControl(ship);
             // 掌舵指令每一下都刷屏，交给面板显示
             if (action != SET_HEADING && action != SET_POWER && action != SET_AUTOPILOT_TARGET) {
                 player.sendSystemMessage(ship.liveReport());

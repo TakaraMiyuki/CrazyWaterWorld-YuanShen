@@ -67,8 +67,9 @@ public final class ShipAssembler {
     public static Result dock(ServerLevel level, VesselEntity vessel) {
         int placed = vessel.deploy();
         BlockPos corePos = null;
+        // 船脑就是声纳台（SonarBlockEntity extends ShipCoreBlockEntity）
         for (int i = 0; i < vessel.palette().size(); i++) {
-            if (vessel.palette().get(i).getBlock() == ModShipBlocks.SHIP_CORE.get()) {
+            if (vessel.palette().get(i).getBlock() == ModShipBlocks.SONAR.get()) {
                 BlockPos offset = vessel.offsets().get(i);
                 corePos = BlockPos.containing(vessel.getX() + offset.getX(),
                         vessel.getY() + offset.getY(), vessel.getZ() + offset.getZ());

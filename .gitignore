@@ -4,6 +4,7 @@ build/
 
 # 客户端/服务端运行目录（含日志、地图存档、配置）
 run/
+run-client/
 runs/
 logs/
 
@@ -23,6 +24,12 @@ bin/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 工具构建产物
+tools/AsmDump/bin/
+tools/AsmDump/obj/
+tools/AsmDump/AsmDump.dll
+tools/AsmDump/AsmDump.runtimeconfig.json
 
 # 其它
 *.log

@@ -42,6 +42,18 @@ public final class ShipSimulation {
     private final double[] water;
     private final double[] oxygen;
     private final MachineCount machines;
+    /** 船体几何（破口空腔、舱室体积都从这里读）。 */
+    private final ShipGeometry.Result geometry;
+    /** 连海空腔（破口舱室）里的水量，按 openPockets 的顺序。 */
+    private final double[] pocketWater;
+    /**
+     * 外界进水速率：每个破口空腔每秒进水（格³/秒），随深度略增。
+     *
+     * <p>2 格³/秒对一间 270 格的舱室要两分多钟，玩家只会以为"没进水"。
+     * 按《潜渊症》Gap 的手感（几百单位/秒、几秒灌满一间舱）放大到 20，
+     * 一间 270 格的舱约 13 秒灌满。以后按真实破口面积算时可以再精调。</p>
+     */
+    private static final double SEA_INFLOW_PER_SECOND = 20.0D;
 
     private double temperature = 3000.0D;
     private double fission = 0.5D;
@@ -50,6 +62,11 @@ public final class ShipSimulation {
     private double ballast;
     private double ballastCapacity;
     private boolean pumpOut = true;
+    /**
+     * 破口格数。洞越大进水越快——潜渊症按 Gap 的开口面积算，
+     * 我们先按"被砸掉的船体格数"线性放大，至少 1 格。
+     */
+    private int breachSize = 1;
 
     private double lastOutput;
     private double lastDemand;
@@ -83,6 +100,103 @@ public final class ShipSimulation {
         }
         this.machines = machines;
         this.ballastCapacity = machines.ballast() * BALLAST_PER_TANK;
+        this.geometry = geometry;
+        this.pocketWater = new double[geometry.openPockets().size()];
+    }
+
+    /**
+     * 破口进水（《潜渊症》模型的 3D 简化版）：连海空腔按"开口面积 × 深度"缓慢灌水。
+     *
+     * <p>原版公式是 {@code flow = 500 * Size * open² * dt}；我们用每个破口空腔每秒
+     * 2 格³ 的基础速率、按深度放大，先保证手感（一两个格子的洞几十秒灌满一间舱）。</p>
+     */
+    public void tickSeaFlood(double dt, double depthMeters) {
+        java.util.List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        for (int i = 0; i < pockets.size(); i++) {
+            double capacity = pockets.get(i).volume() * UNITS_PER_BLOCK;
+            if (pocketWater[i] >= capacity) {
+                continue;
+            }
+            double depthFactor = 1.0D + Math.max(0.0D, depthMeters) / 100.0D;
+            double flow = SEA_INFLOW_PER_SECOND * depthFactor * Math.max(1, breachSize);
+            pocketWater[i] = Math.min(capacity,
+                    pocketWater[i] + flow * UNITS_PER_BLOCK * dt);
+        }
+    }
+
+    /**
+     * 船体破损后重新分舱：保留反应堆/压载/气闸这些"玩家调过的设置"，
+     * 只重建舱室水量数组。否则砸一个洞就会把压载和反应堆输出全部清零。
+     */
+    public void copySettingsFrom(ShipSimulation old) {
+        if (old == null) {
+            return;
+        }
+        this.temperature = old.temperature;
+        this.fission = old.fission;
+        this.turbine = old.turbine;
+        this.fuelRods = old.fuelRods;
+        this.ballast = old.ballast;
+        this.ballastCapacity = old.ballastCapacity;
+        this.pumpOut = old.pumpOut;
+        this.airlockPhase = old.airlockPhase;
+        this.airlockWater = old.airlockWater;
+        this.airlockCycles = old.airlockCycles;
+    }
+
+    /**
+     * 破损重分舱时把旧水量带进新几何。
+     *
+     * <p>每砸一个新洞都会重建 `ShipSimulation`；如果水量从 0 开始，
+     * 玩家连续砸几格就会看到水位每次归零（"进水效果不对"）。
+     * 密闭舱室和连海空腔各按容积比例分配；某一类在新船里不存在时并入另一类。</p>
+     */
+    public void seedWater(double sealedUnits, double pocketUnits) {
+        double sealedCapacity = 0.0D;
+        for (int volume : volumes) {
+            sealedCapacity += volume * UNITS_PER_BLOCK;
+        }
+        List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        double pocketCapacity = 0.0D;
+        for (ShipGeometry.Compartment pocket : pockets) {
+            pocketCapacity += pocket.volume() * UNITS_PER_BLOCK;
+        }
+        double sealed = Math.max(0.0D, sealedUnits);
+        double pocket = Math.max(0.0D, pocketUnits);
+        if (pocketCapacity <= 0.0D) {
+            sealed += pocket;
+            pocket = 0.0D;
+        }
+        if (sealedCapacity <= 0.0D) {
+            pocket += sealed;
+            sealed = 0.0D;
+        }
+        if (sealedCapacity > 0.0D && sealed > 0.0D) {
+            double amount = Math.min(sealed, sealedCapacity);
+            for (int i = 0; i < water.length; i++) {
+                water[i] = amount * (volumes[i] * UNITS_PER_BLOCK / sealedCapacity);
+            }
+        }
+        if (pocketCapacity > 0.0D && pocket > 0.0D) {
+            double amount = Math.min(pocket, pocketCapacity);
+            for (int i = 0; i < pocketWater.length; i++) {
+                pocketWater[i] = amount * (pockets.get(i).volume() * UNITS_PER_BLOCK / pocketCapacity);
+            }
+        }
+    }
+
+    /** 第 index 个连海空腔当前水量（单位）。 */
+    public double pocketWater(int index) {
+        return index >= 0 && index < pocketWater.length ? pocketWater[index] : 0.0D;
+    }
+
+    /** 所有连海空腔的总水量（单位）。 */
+    public double pocketWaterTotal() {
+        double total = 0.0D;
+        for (double value : pocketWater) {
+            total += value;
+        }
+        return total;
     }
 
     /** 推进一个时间步（秒）。 */
@@ -185,6 +299,11 @@ public final class ShipSimulation {
 
     public int airlockCycles() {
         return airlockCycles;
+    }
+
+    /** 设置破口格数（>=1）；洞越多进水越快。 */
+    public void setBreachSize(int size) {
+        this.breachSize = Math.max(1, size);
     }
 
     /** 直接往第 index 个舱室灌水（测试/事件用）。 */

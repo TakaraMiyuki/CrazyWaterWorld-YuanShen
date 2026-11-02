@@ -4,7 +4,7 @@ package com.opamb.barotrauma.ship;
  * 船的连续运动模型：速度、加速度、惯性、浮力，最后才量化成方块位移。
  *
  * <p>方块世界没法让方块停在半格上，所以这里把"物理量"和"落格"拆开：
- * 速度和位移都是连续的（格/秒、格），每 tick 只把攒够的整数格交给 {@link ShipMover} 执行，
+ * 速度和位移都是连续的（格/秒、格）。方块形态的落格移动已删除，
  * 余量留到下一 tick。于是加减速是连续的、转向有惯性、撞墙后不会瞬间停死。</p>
  *
  * <p>数值来源（见 PLAN.md §10.25）：引擎满推力 6 格/秒（1 格 = 1 米，约 21 km/h，
@@ -13,10 +13,10 @@ package com.opamb.barotrauma.ship;
  */
 public final class ShipPhysics {
 
-    /** 满推力水平速度（格/秒）。 */
-    public static final double MAX_SPEED = 6.0D;
+    /** 满推力水平速度（格/秒）。方块船路线：提到 10 格/秒，减少"跳格"感。 */
+    public static final double MAX_SPEED = 10.0D;
     /** 推进器垂直速度（格/秒）。 */
-    public static final double MAX_RISE = 2.5D;
+    public static final double MAX_RISE = 3.5D;
     /** 水平速度逼近时间常数（秒）。越大越"沉"。 */
     private static final double TAU_HORIZONTAL = 0.9D;
     /** 垂直速度逼近时间常数（秒）。水的阻力比空气大得多。 */
@@ -160,6 +160,21 @@ public final class ShipPhysics {
         vx = 0.0D;
         vy = 0.0D;
         vz = 0.0D;
+        fx = 0.0D;
+        fy = 0.0D;
+        fz = 0.0D;
+    }
+
+    /**
+     * 把外部（VS2 刚体）的真实速度写进来。
+     *
+     * <p>船交给物理引擎之后，方块那套积分不再跑，{@link #speed()} 会一直读 0，
+     * 声纳面板上的航速 / 下潜速度就成了假数据。每 tick 用刚体的速度同步一次即可。</p>
+     */
+    public void sync(double newVx, double newVy, double newVz) {
+        vx = newVx;
+        vy = newVy;
+        vz = newVz;
         fx = 0.0D;
         fy = 0.0D;
         fz = 0.0D;

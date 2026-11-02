@@ -171,7 +171,14 @@ public final class ShipGeometry {
                 new Bounds(minX, minY, minZ, maxX, maxY, maxZ), hull);
     }
 
-    /** 收集船体方块：半径内所有船体方块里，**离核心最近**的那个连通块（不是最大的）。 */
+    /**
+     * 收集船体方块：半径内所有船体方块里，**离核心最近**的那个连通块（不是最大的）。
+     *
+     * <p>核心自身那一格要被排除。声纳台从这一版起兼任船核心，它同时也是
+     * {@code isShipBlock}（这样装船时才会被收进刚体），于是会出现一个很坑的情况：
+     * 核心自己构成一个"距离 0"的连通块，被选中，整艘船反而没被识别——装船只收到 1 格。
+     * 排除核心自身之后，选中的才是外面那层真正的船壳。</p>
+     */
     public static Set<BlockPos> collectHull(BlockPos core, int radius, Predicate<BlockPos> isShipBlock) {
         Set<BlockPos> shipBlocks = new HashSet<>();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -180,6 +187,9 @@ public final class ShipGeometry {
                 for (int z = core.getZ() - radius; z <= core.getZ() + radius; z++) {
                     cursor.set(x, y, z);
                     BlockPos pos = cursor.immutable();
+                    if (pos.equals(core)) {
+                        continue;
+                    }
                     if (isShipBlock.test(pos)) {
                         shipBlocks.add(pos);
                     }

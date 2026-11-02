@@ -2,18 +2,21 @@ package com.opamb.barotrauma.event;
 
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.opamb.barotrauma.BarotraumaMod;
-import com.opamb.barotrauma.block.ShipDoorBlock;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
 import com.opamb.barotrauma.registry.ModBlocks;
 import com.opamb.barotrauma.registry.ModShipBlocks;
 import com.opamb.barotrauma.ship.ShipCores;
-import com.opamb.barotrauma.ship.ShipMover;
 import com.opamb.barotrauma.ship.ShipState;
+import com.opamb.barotrauma.ship.vs.VsBridge;
+import com.opamb.barotrauma.ship.vs.VsFloodSmoke;
 import com.opamb.barotrauma.ship.vs.VsPilot;
+import com.opamb.barotrauma.ship.vs.VsState;
 import com.opamb.barotrauma.ship.vs.VsSupport;
+import com.opamb.barotrauma.ship.water.ShipVolumeGuard;
 import com.opamb.barotrauma.sonar.SonarScan;
 import com.opamb.barotrauma.world.ModDimensions;
 import com.opamb.barotrauma.world.StarterSub;
@@ -34,7 +37,9 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.network.NetworkHooks;
 import net.minecraftforge.fml.common.Mod;
 import org.jetbrains.annotations.Nullable;
 
@@ -54,6 +59,18 @@ public final class DeepSeaEvents {
     private static ShipCoreBlockEntity smokeCore;
 
     private DeepSeaEvents() {
+    }
+
+    /**
+     * 交互锚点不许被拆掉（创造模式能拆".strength(-1)"的方块）。
+     *
+     * <p>它不是真实的船上设备，只是声纳的点击代理；被拆掉玩家就再也开不了声纳。</p>
+     */
+    @SubscribeEvent
+    public static void onProxyBreak(net.minecraftforge.event.level.BlockEvent.BreakEvent event) {
+        if (event.getState().is(ModShipBlocks.SONAR_PROXY.get())) {
+            event.setCanceled(true);
+        }
     }
 
     /** 第一次进服的玩家直接送进哨站，并把重生点设在那里。 */
@@ -147,16 +164,6 @@ public final class DeepSeaEvents {
                                             player.sendSystemMessage(ship.simulate(seconds));
                                             return 1;
                                         })))
-                        .then(Commands.literal("airlock")
-                                .then(Commands.literal("drain")
-                                        .executes(ctx -> airlock(ctx, true)))
-                                .then(Commands.literal("flood")
-                                        .executes(ctx -> airlock(ctx, false))))
-                        .then(Commands.literal("pump")
-                                .then(Commands.literal("in")
-                                        .executes(ctx -> pump(ctx, false)))
-                                .then(Commands.literal("out")
-                                        .executes(ctx -> pump(ctx, true))))
                         .then(Commands.literal("flood")
                                 .then(Commands.argument("units", DoubleArgumentType.doubleArg(0.0D, 100000.0D))
                                         .executes(ctx -> {
@@ -176,11 +183,6 @@ public final class DeepSeaEvents {
                                                     .withStyle(ChatFormatting.AQUA));
                                             return 1;
                                         })))
-                        .then(Commands.literal("move")
-                                .then(Commands.argument("dx", IntegerArgumentType.integer(-32, 32))
-                                        .then(Commands.argument("dy", IntegerArgumentType.integer(-32, 32))
-                                                .then(Commands.argument("dz", IntegerArgumentType.integer(-32, 32))
-                                                        .executes(DeepSeaEvents::moveShip)))))
                         .then(Commands.literal("throttle")
                                 .then(Commands.argument("dx", IntegerArgumentType.integer(-1, 1))
                                         .then(Commands.argument("dy", IntegerArgumentType.integer(-1, 1))
@@ -201,7 +203,7 @@ public final class DeepSeaEvents {
                                                                         IntegerArgumentType.integer(-64, 64))
                                                                 .executes(DeepSeaEvents::autopilotGoto))))))
                         .then(Commands.literal("sonar")
-                                .executes(ctx -> sonar(ctx, SonarScan.DEFAULT_RANGE, SonarScan.Mode.ACTIVE))
+                                .executes(ctx -> openSonar(ctx))
                                 .then(Commands.literal("passive")
                                         .executes(ctx -> sonar(ctx, SonarScan.DEFAULT_RANGE,
                                                 SonarScan.Mode.PASSIVE)))
@@ -215,15 +217,21 @@ public final class DeepSeaEvents {
                                                 IntegerArgumentType.integer(SonarScan.MIN_RANGE, SonarScan.MAX_RANGE))
                                         .executes(ctx -> sonar(ctx, IntegerArgumentType.getInteger(ctx, "range"),
                                                 SonarScan.Mode.ACTIVE))))
-                        .then(Commands.literal("reactor")
-                                .then(Commands.argument("fission", DoubleArgumentType.doubleArg(0.0D, 100.0D))
-                                        .then(Commands.argument("turbine", DoubleArgumentType.doubleArg(0.0D, 100.0D))
-                                                .executes(DeepSeaEvents::reactor))))
                         // 物理船（瓦尔基里天空 2）：装船后整艘船变成刚体，方块离开世界
                         .then(Commands.literal("vs")
-                                .then(Commands.literal("launch").executes(DeepSeaEvents::vsLaunch))
+                                .then(Commands.literal("launch")
+                                        .executes(DeepSeaEvents::vsLaunch)
+                                        // 控制台也能装船：不给玩家时按坐标找核心，方便无人调试
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(ctx -> vsLaunchAt(ctx,
+                                                        BlockPosArgument.getBlockPos(ctx, "pos")))))
                                 .then(Commands.literal("dock").executes(DeepSeaEvents::vsDock))
                                 .then(Commands.literal("status").executes(DeepSeaEvents::vsStatus))
+                                // 进水诊断：船原来占的那片世界里现在有多少格是海水
+                                .then(Commands.literal("flood").executes(DeepSeaEvents::vsFlood))
+                                // 全局统计：船 / 已加载船 / 物理实体各多少。没船也能跑，
+                                // 用来判断"存档里加载回来的船到底有没有物理实体"。
+                                .then(Commands.literal("world").executes(DeepSeaEvents::vsWorld))
                                 .then(Commands.literal("thrust")
                                         .then(Commands.argument("dx", IntegerArgumentType.integer(-1, 1))
                                                 .then(Commands.argument("dy", IntegerArgumentType.integer(-1, 1))
@@ -359,55 +367,29 @@ public final class DeepSeaEvents {
     }
 
 
-    /** 平移整艘船（最小可动版本）。 */
-    private static int moveShip(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+    /**
+     * 打开声纳界面。
+     *
+     * <p>物理船的方块在 VS2 船坞区块里，右键声纳台不会生效（VS2 2.4.11 不重映射方块交互），
+     * 所以掌舵入口改成命令：站在船上执行 {@code /barotrauma ship sonar} 即可。</p>
+     */
+    private static int openSonar(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
         ServerPlayer player = ctx.getSource().getPlayerOrException();
-        BlockEntity found = findShipCore(player);
-        if (!(found instanceof ShipCoreBlockEntity core)) {
-            ctx.getSource().sendFailure(Component.literal("附近 16 格内没有船核心"));
-            return 0;
+        ServerLevel level = player.serverLevel();
+        BlockPos anchor = player.blockPosition();
+        ShipCoreBlockEntity core = ShipCores.resolve(level, null, anchor);
+        if (core != null && core.state() == null) {
+            core.rescan(level);
         }
-        int dx = IntegerArgumentType.getInteger(ctx, "dx");
-        int dy = IntegerArgumentType.getInteger(ctx, "dy");
-        int dz = IntegerArgumentType.getInteger(ctx, "dz");
-        ShipMover.Result result = ShipMover.move(player.serverLevel(), core.getBlockPos(), dx, dy, dz);
-        player.sendSystemMessage(Component.literal(result.message())
-                .withStyle(result.ok() ? ChatFormatting.AQUA : ChatFormatting.RED));
-        return result.ok() ? 1 : 0;
-    }
-
-    /** 水泵方向。 */
-    private static int pump(CommandContext<CommandSourceStack> ctx, boolean out) throws CommandSyntaxException {
-        ServerPlayer player = ctx.getSource().getPlayerOrException();
-        BlockEntity found = findShipCore(player);
-        if (!(found instanceof ShipCoreBlockEntity core)) {
-            ctx.getSource().sendFailure(Component.literal("附近 16 格内没有船核心"));
-            return 0;
-        }
-        ShipState ship = ensureState(core, player.serverLevel());
-        ship.simulation().setPumpOut(out);
-        player.sendSystemMessage(Component.literal("水泵：" + (out ? "抽出（OUT）" : "注入（IN）"))
-                .withStyle(ChatFormatting.AQUA));
-        return 1;
-    }
-
-    /** 反应堆裂变率 / 涡轮输出（百分比）。 */
-    private static int reactor(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
-        ServerPlayer player = ctx.getSource().getPlayerOrException();
-        BlockEntity found = findShipCore(player);
-        if (!(found instanceof ShipCoreBlockEntity core)) {
-            ctx.getSource().sendFailure(Component.literal("附近 16 格内没有船核心"));
-            return 0;
-        }
-        double fission = DoubleArgumentType.getDouble(ctx, "fission") / 100.0D;
-        double turbine = DoubleArgumentType.getDouble(ctx, "turbine") / 100.0D;
-        ShipState ship = ensureState(core, player.serverLevel());
-        ship.simulation().setFission(fission);
-        ship.simulation().setTurbine(turbine);
-        player.sendSystemMessage(Component.literal(String.format(Locale.ROOT,
-                        "反应堆：裂变 %d%% / 涡轮 %d%%",
-                        Math.round(fission * 100.0D), Math.round(turbine * 100.0D)))
-                .withStyle(ChatFormatting.AQUA));
+        NetworkHooks.openScreen(player,
+                new net.minecraft.world.SimpleMenuProvider(
+                        (id, inventory, p) -> new com.opamb.barotrauma.menu.SonarMenu(
+                                id, inventory, anchor, SonarScan.DEFAULT_RANGE),
+                        Component.translatable("block.barotrauma.sonar")),
+                buf -> {
+                    buf.writeBlockPos(anchor);
+                    buf.writeVarInt(SonarScan.DEFAULT_RANGE);
+                });
         return 1;
     }
 
@@ -428,9 +410,53 @@ public final class DeepSeaEvents {
         // 用包围盒收集全部船方块，而不是 geometry.hull()（最大连通分量）：
         // 漏掉的那些会留在原地，看起来就是"船开走了原地还剩一截"。
         java.util.Set<BlockPos> blocks = state.collectBlocks(player.serverLevel());
-        player.sendSystemMessage(Component.literal(VsPilot.launch(player.serverLevel(), blocks, state))
+        player.sendSystemMessage(Component.literal(
+                        "⚠ 物理船：方块会被 VS2 收进刚体（世界里那一格只剩空气，这是正常的），"
+                                + "之后移动只走物理、方块那一套自动停用；舵在声纳里，"
+                                + "拆回来用 /barotrauma ship vs dock（按装配快照原样铺回）")
+                .withStyle(ChatFormatting.GOLD));
+        player.sendSystemMessage(Component.literal(
+                        VsPilot.launch(player.serverLevel(), blocks, state, core.getBlockPos()))
                 .withStyle(ChatFormatting.AQUA));
         return 1;
+    }
+
+    /** 不给玩家时按坐标装船，控制台也能跑（无人调试用）。 */
+    private static int vsLaunchAt(CommandContext<CommandSourceStack> ctx, BlockPos center) {
+        if (!VsSupport.available()) {
+            ctx.getSource().sendFailure(Component.literal("没装瓦尔基里天空 2（valkyrienskies），物理船不可用"));
+            return 0;
+        }
+        ServerLevel level = ctx.getSource().getLevel();
+        BlockEntity found = findShipCore(level, center);
+        if (!(found instanceof ShipCoreBlockEntity core)) {
+            ctx.getSource().sendFailure(Component.literal("坐标附近 16 格内没有船核心"));
+            return 0;
+        }
+        ShipState state = ensureState(core, level);
+        java.util.Set<BlockPos> blocks = state.collectBlocks(level);
+        ctx.getSource().sendSuccess(
+                () -> Component.literal(VsPilot.launch(level, blocks, state, core.getBlockPos())), false);
+        return 1;
+    }
+
+    /** 找指定坐标附近最近的船核心（不看玩家）。 */
+    @Nullable
+    private static BlockEntity findShipCore(ServerLevel level, BlockPos center) {
+        BlockEntity best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-16, -16, -16), center.offset(16, 16, 16))) {
+            BlockEntity be = level.getBlockEntity(pos);
+            if (!(be instanceof ShipCoreBlockEntity core)) {
+                continue;
+            }
+            double dist = pos.distSqr(center);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = core;
+            }
+        }
+        return best;
     }
 
     private static int vsDock(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
@@ -444,12 +470,39 @@ public final class DeepSeaEvents {
         return 1;
     }
 
-    private static int vsStatus(CommandContext<CommandSourceStack> ctx) {
+    /**
+     * 进水诊断：物理船原来占的那片世界现在有多少格是海水。
+     *
+     * <p>VS2 装配会把船体方块从世界里挖走，海里那一块立刻被海水灌满。玩家透过透明船壳看，
+     * 看到的就是"船里全是水"。这条命令就是量这个数字的。</p>
+     */
+    private static int vsFlood(CommandContext<CommandSourceStack> ctx) {
         if (!VsSupport.available()) {
             ctx.getSource().sendFailure(Component.literal("没装瓦尔基里天空 2"));
             return 0;
         }
+        ServerLevel level = ctx.getSource().getLevel();
+        ctx.getSource().sendSuccess(
+                () -> Component.literal(VsPilot.floodProbe(level, VsPilot.state())), false);
+        return 1;
+    }
+
+    private static int vsStatus(CommandContext<CommandSourceStack> ctx) {        if (!VsSupport.available()) {
+            ctx.getSource().sendFailure(Component.literal("没装瓦尔基里天空 2"));
+            return 0;
+        }
         ctx.getSource().sendSuccess(() -> Component.literal(VsPilot.status()), false);
+        return 1;
+    }
+
+    /** 当前维度 VS2 船世界的全局统计（不看有没有我们的船）。 */
+    private static int vsWorld(CommandContext<CommandSourceStack> ctx) {
+        if (!VsSupport.available()) {
+            ctx.getSource().sendFailure(Component.literal("没装瓦尔基里天空 2"));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                VsBridge.worldStats(ctx.getSource().getLevel())), false);
         return 1;
     }
 
@@ -459,6 +512,11 @@ public final class DeepSeaEvents {
             return 0;
         }
         VsPilot.thruster().setThrottle(dx, dy, dz);
+        // 面板上的推力来自 ShipState，控制台改推力也要同步过去，否则面板显示 0 实际在推
+        ShipState ship = VsPilot.state();
+        if (ship != null) {
+            ship.setThrottle(dx, dy, dz);
+        }
         ctx.getSource().sendSuccess(() -> Component.literal("物理船推力 (" + dx + "," + dy + "," + dz + ")"), false);
         return 1;
     }
@@ -469,27 +527,15 @@ public final class DeepSeaEvents {
             return 0;
         }
         VsPilot.thruster().setPower(percent);
+        ShipState ship = VsPilot.state();
+        if (ship != null) {
+            ship.setPower(percent);
+        }
         ctx.getSource().sendSuccess(() -> Component.literal("物理船推力 " + percent + "%"), false);
         return 1;
     }
 
-    /** 气闸操作：drain = 抽干出舱，flood = 注水回船。 */
-    private static int airlock(CommandContext<CommandSourceStack> ctx, boolean drain) throws CommandSyntaxException {
-        ServerPlayer player = ctx.getSource().getPlayerOrException();
-        BlockEntity found = findShipCore(player);
-        if (!(found instanceof ShipCoreBlockEntity core)) {
-            ctx.getSource().sendFailure(Component.literal("附近 16 格内没有船核心"));
-            return 0;
-        }
-        ShipState ship = ensureState(core, player.serverLevel());
-        boolean accepted = drain ? ship.simulation().requestDrain() : ship.simulation().requestFlood();
-        if (!accepted) {
-            ctx.getSource().sendFailure(Component.literal("气闸无法执行：" + (drain ? "没有气闸或舱内已空" : "没有气闸或已满")));
-            return 0;
-        }
-        player.sendSystemMessage(ship.simulate(10.0D));
-        return 1;
-    }
+    // ------------------------------------------------------------------ 物理船（VS2）
 
     /**
      * A2 自检：在实心岩里搭一个 9×5×15 的空盒子（外壳装甲板、内部空气），放船核心后扫描。
@@ -528,18 +574,9 @@ public final class DeepSeaEvents {
             }
         }
 
-        // 装机器：反应堆 / 制氧机 / 水泵 / 压载舱 / 引擎 / 驾驶台
-        deep.setBlock(base.offset(2, 1, 2), ModShipBlocks.NUCLEAR_REACTOR.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(3, 1, 2), ModShipBlocks.OXYGEN_GENERATOR.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(4, 1, 2), ModShipBlocks.PUMP.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(5, 1, 2), ModShipBlocks.BALLAST_TANK.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(2, 1, 4), ModShipBlocks.ENGINE.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(3, 1, 4), ModShipBlocks.HELM.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(6, 1, 2), ModShipBlocks.AIRLOCK_DOOR.get().defaultBlockState(), 3);
-        deep.setBlock(base.offset(5, 1, 4), ModShipBlocks.SONAR.get().defaultBlockState(), 3);
-
-        BlockPos corePos = base.offset(4, 2, 7);
-        deep.setBlock(corePos, ModShipBlocks.SHIP_CORE.get().defaultBlockState(), 3);
+        // 声纳台就是船脑（机器/舱门已删除，自检船只有船壳 + 声纳）
+        BlockPos corePos = base.offset(5, 1, 4);
+        deep.setBlock(corePos, ModShipBlocks.SONAR.get().defaultBlockState(), 3);
         // 贴着船体放一圈站点装甲：它不该被算进船体
         BlockState station = ModShipBlocks.STATION_PLATING.get().defaultBlockState();
         for (int i = 1; i <= 8; i++) {
@@ -628,14 +665,6 @@ public final class DeepSeaEvents {
                     String.format(java.util.Locale.ROOT, "%.2f", coastSpeed),
                     String.format(java.util.Locale.ROOT, "%.2f", sinking.verticalSpeed()));
 
-            // 场景 0：反应堆拉满（命令 /barotrauma ship reactor 100 100 走的就是这两个 setter）
-            ship.simulation().setFission(1.0D);
-            ship.simulation().setTurbine(1.0D);
-            BarotraumaMod.LOGGER.info("[smoketest] reactor 100%/100% 1s -> {}",
-                    ship.simulate(1.0D).getString());
-            ship.simulation().setFission(0.5D);
-            ship.simulation().setTurbine(0.5D);
-
             // 水方块可视化：注入 5000 单位（=50 格），应从舱底铺起 50 格水
             ship.simulation().flood(0, 5000.0D);
             int placed = ship.applyWater(deep);
@@ -647,76 +676,6 @@ public final class DeepSeaEvents {
             }
             BarotraumaMod.LOGGER.info("[smoketest] water apply -> changed={} waterCells={} (expect 50)",
                     placed, waterCells);
-            BarotraumaMod.LOGGER.info("[smoketest] ship sim 30s (pump OUT) -> {}",
-                    ship.simulate(30.0D).getString());
-
-            // 场景 2：切到注水模式，5 秒把压载舱灌满
-            ship.simulation().setPumpOut(false);
-            BarotraumaMod.LOGGER.info("[smoketest] ship sim 5s (pump IN) -> {}",
-                    ship.simulate(5.0D).getString());
-
-            // 场景 3：气闸抽干 / 注水
-            BarotraumaMod.LOGGER.info("[smoketest] airlock drain accepted={}",
-                    ship.simulation().requestDrain());
-            BarotraumaMod.LOGGER.info("[smoketest] airlock drain 10s -> {}",
-                    ship.simulate(10.0D).getString());
-            BarotraumaMod.LOGGER.info("[smoketest] airlock flood accepted={}",
-                    ship.simulation().requestFlood());
-            BarotraumaMod.LOGGER.info("[smoketest] airlock flood 10s -> {}",
-                    ship.simulate(10.0D).getString());
-
-            // 场景 4：整船平移 +12 格（最小可动版本）
-            double tempBefore = ship.simulation().report().temperature();
-            ShipMover.Result moved = ShipMover.move(deep, corePos, 0, 0, 12);
-            BarotraumaMod.LOGGER.info("[smoketest] move -> ok={} msg={}", moved.ok(), moved.message());
-            BlockPos newCorePos = corePos.offset(0, 0, 12);
-            int movedCompartments = -1;
-            if (deep.getBlockEntity(newCorePos) instanceof ShipCoreBlockEntity movedCore
-                    && movedCore.state() != null) {
-                movedCompartments = movedCore.state().compartments().size();
-                BarotraumaMod.LOGGER.info(
-                        "[smoketest] move keeps sim -> tempBefore={} tempAfter={} water={} (平移不该重置模拟)",
-                        Math.round(tempBefore),
-                        Math.round(movedCore.state().simulation().report().temperature()),
-                        Math.round(movedCore.state().simulation().report().waterUnits()));
-                smokeCore = movedCore;
-            }
-            BarotraumaMod.LOGGER.info("[smoketest] after move -> newCore={} compartments={} oldCoreIsWater={}",
-                    deep.getBlockState(newCorePos), movedCompartments,
-                    deep.getBlockState(corePos).is(Blocks.WATER));
-
-            // 场景 5：驾驶 —— 先在来路（开阔水域）验证"真的会走"，再反向顶墙验撞击
-            BlockPos cursorPos = newCorePos;
-            ShipState driving = deep.getBlockEntity(newCorePos) instanceof ShipCoreBlockEntity driveCore
-                    ? driveCore.state() : null;
-            if (driving != null) {
-                BlockPos driveStart = cursorPos;
-                driving.setThrottle(0, 0, -1);
-                for (int i = 0; i < 20; i++) {
-                    cursorPos = driving.tickMovement(deep, cursorPos);
-                    if (deep.getBlockEntity(cursorPos) instanceof ShipCoreBlockEntity next && next.state() != null) {
-                        driving = next.state();
-                    }
-                }
-                int travelled = (int) Math.round(Math.sqrt(driveStart.distSqr(cursorPos)));
-                BarotraumaMod.LOGGER.info("[smoketest] drive 2s -> 走了 {} 格（{}/秒），期望 ~10", travelled,
-                        String.format(java.util.Locale.ROOT, "%.1f", travelled / 2.0D));
-
-                driving.setThrottle(0, 0, 1);
-                for (int i = 0; i < 160; i++) {
-                    cursorPos = driving.tickMovement(deep, cursorPos);
-                    if (deep.getBlockEntity(cursorPos) instanceof ShipCoreBlockEntity next && next.state() != null) {
-                        driving = next.state();
-                    }
-                }
-                ShipState after = driving;
-                if (deep.getBlockEntity(cursorPos) instanceof ShipCoreBlockEntity last && last.state() != null) {
-                    after = last.rescan(deep);
-                }
-                BarotraumaMod.LOGGER.info("[smoketest] drive -> core={} stopped={} hull={} sealed={}",
-                        cursorPos.toShortString(), !after.throttled(), after.geometry().hullBlocks(),
-                        after.geometry().sealed());
-            }
 
             // 留给实时 tick 验证：200 tick 后打印状态并关服
             if (smokeCore == null) {
@@ -728,55 +687,7 @@ public final class DeepSeaEvents {
         }
     }
 
-    /**
-     * 连通性自检：11×5×15 的盒子中间隔一道墙，门上开一个洞。
-     * 门关 = 2 个舱室；门开 = 1 个舱室；拆掉外墙 = 连海。
-     */
-    private static void doorSelfTest(ServerLevel deep) {
-        BlockPos base = new BlockPos(300, -200, 200);
-        deep.getChunk(base.getX() >> 4, base.getZ() >> 4);
-        deep.setChunkForced(base.getX() >> 4, base.getZ() >> 4, true);
 
-        BlockState hull = ModBlocks.SUBMARINE_PLATING.get().defaultBlockState();
-        BlockState air = Blocks.AIR.defaultBlockState();
-        for (int dx = 0; dx <= 10; dx++) {
-            for (int dy = 0; dy <= 4; dy++) {
-                for (int dz = 0; dz <= 14; dz++) {
-                    boolean shell = dx == 0 || dx == 10 || dy == 0 || dy == 4 || dz == 0 || dz == 14;
-                    deep.setBlock(base.offset(dx, dy, dz), shell ? hull : air, 3);
-                }
-            }
-        }
-        for (int dy = 1; dy <= 3; dy++) {
-            for (int dz = 1; dz <= 13; dz++) {
-                deep.setBlock(base.offset(5, dy, dz), hull, 3);
-            }
-        }
-        BlockPos doorPos = base.offset(5, 1, 7);
-        deep.setBlock(doorPos, ModShipBlocks.HATCH.get().defaultBlockState(), 3);
-
-        BlockPos corePos = base.offset(2, 2, 7);
-        deep.setBlock(corePos, ModShipBlocks.SHIP_CORE.get().defaultBlockState(), 3);
-        if (!(deep.getBlockEntity(corePos) instanceof ShipCoreBlockEntity core)) {
-            BarotraumaMod.LOGGER.warn("[smoketest] door test core missing");
-            return;
-        }
-
-        ShipState closed = core.rescan(deep);
-        BarotraumaMod.LOGGER.info("[smoketest] door closed -> compartments={} sealed={}",
-                closed.compartments().size(), closed.geometry().sealed());
-
-        BlockState door = deep.getBlockState(doorPos);
-        deep.setBlock(doorPos, door.setValue(ShipDoorBlock.OPEN, Boolean.TRUE), 3);
-        ShipState open = core.rescan(deep);
-        BarotraumaMod.LOGGER.info("[smoketest] door open -> compartments={} volume={}",
-                open.compartments().size(), open.geometry().totalVolume());
-
-        deep.setBlock(base.offset(10, 2, 7), air, 3);
-        ShipState breached = core.rescan(deep);
-        BarotraumaMod.LOGGER.info("[smoketest] hull breach -> sealed={} openPockets={}",
-                breached.geometry().sealed(), breached.geometry().openPockets().size());
-    }
 
     /** 找玩家附近最近的船核心。 */
     @Nullable
@@ -799,11 +710,51 @@ public final class DeepSeaEvents {
     }
 
     /**
+     * 单机退出世界后 JVM 不退出，物理船是静态单例。这里在服务器停止/启动时
+     * 清掉上一世界残留的船状态，否则新世界会被误判为"初始潜艇已收成物理船"。
+     */
+    private static void resetShipRuntime(String phase) {
+        VsState.deactivate();
+        ShipVolumeGuard.deactivate();
+        if (VsSupport.available()) {
+            VsPilot.resetForServerLifecycle();
+        }
+        BarotraumaMod.LOGGER.info("[Barotrauma] 已清理物理船静态状态（{}）", phase);
+    }
+
+    @SubscribeEvent
+    public static void onServerStopped(ServerStoppedEvent event) {
+        resetShipRuntime("服务器停止");
+    }
+
+    /**
      * 开发期自检：run/.smoketest 存在时，生成一次哨站区块、打印水柱统计然后关服。
      * 用 gradlew runServer 跑，验证生成器不会崩。
      */
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
+        // 新服务器不可能沿用上一个服务器的刚体；顺便兜住上次崩溃没走到 ServerStoppedEvent 的情况。
+        resetShipRuntime("服务器启动");
+        // 隔离场景优先：run/.smoketest-vs 只跑 VsFloodSmoke（水面空腔灌水实验），不跑总自检
+        File vsMarker = new File(".smoketest-vs");
+        if (!vsMarker.isFile()) {
+            vsMarker = new File("run/.smoketest-vs");
+        }
+        if (vsMarker.isFile()) {
+            MinecraftServer vsServer = event.getServer();
+            ServerLevel vsDeep = vsServer.getLevel(ModDimensions.THE_DEEP);
+            boolean started = vsDeep != null && VsSupport.available() && VsFloodSmoke.begin(vsDeep);
+            if (!started) {
+                BarotraumaMod.LOGGER.warn("[smoketest-vs] 场景无法启动（维度或 VS2 不可用）");
+            }
+            if (!vsMarker.delete()) {
+                BarotraumaMod.LOGGER.warn("[smoketest-vs] 无法删除标记文件 {}", vsMarker.getAbsolutePath());
+            }
+            if (!started) {
+                vsServer.halt(false);
+            }
+            return;
+        }
         File marker = new File(".smoketest");
         if (!marker.isFile()) {
             marker = new File("run/.smoketest");
@@ -838,7 +789,7 @@ public final class DeepSeaEvents {
             int leaked = 0;
             for (int x = -18; x <= 18; x++) {
                 for (int z = -10; z <= 10; z++) {
-                    for (int y = ModDimensions.OUTPOST_SPAWN_Y; y <= -142; y++) {
+                    for (int y = ModDimensions.OUTPOST_SPAWN_Y; y <= ModDimensions.OUTPOST_SPAWN_Y + 16; y++) {
                         if (deep.getBlockState(new BlockPos(x, y, z)).is(Blocks.WATER)) {
                             leaked++;
                         }
@@ -846,10 +797,19 @@ public final class DeepSeaEvents {
                 }
             }
             BarotraumaMod.LOGGER.info("[smoketest] outpost leaked water blocks = {}", leaked);
+
+            // 新布局几何：哨站顶装甲（y=-44）上应直接是顶板岩（贴岩壁），装甲下一格缝隙（y=-45，
+            // 压平区天然水层顶部）应是水＝"水池贴顶、哨站上沿嵌进岩壁"的观感来源
+            BarotraumaMod.LOGGER.info("[smoketest] roof seal: armor(0,-44)={} rock(0,-43)={}",
+                    deep.getBlockState(new BlockPos(0, ModDimensions.OUTPOST_Y + 10, 0)),
+                    deep.getBlockState(new BlockPos(0, ModDimensions.OUTPOST_Y + 11, 0)));
+            BarotraumaMod.LOGGER.info("[smoketest] pool: beside hull (22,-54)={} station ceiling (0,-45)={}",
+                    deep.getBlockState(new BlockPos(22, ModDimensions.OUTPOST_Y, 0)),
+                    deep.getBlockState(new BlockPos(0, -45, 0)));
             BarotraumaMod.LOGGER.info("[smoketest] door={} outside={} shell={}",
                     deep.getBlockState(new BlockPos(0, ModDimensions.OUTPOST_SPAWN_Y, 12)),
                     deep.getBlockState(new BlockPos(0, ModDimensions.OUTPOST_SPAWN_Y, 14)),
-                    deep.getBlockState(new BlockPos(20, -150, 0)));
+                    deep.getBlockState(new BlockPos(20, ModDimensions.OUTPOST_Y, 0)));
 
             // 分层统计：远离哨站的 48x48 区域，看每个深度有多少岩体、多少"被岩石上下夹住的水"
             // 切片可视图：# 岩石  ~ 水  空格 空气
@@ -913,7 +873,6 @@ public final class DeepSeaEvents {
             } else {
                 BarotraumaMod.LOGGER.warn("[smoketest] starter sub missing at {}", StarterSub.corePos());
             }
-            doorSelfTest(deep);
             BarotraumaMod.LOGGER.info("[smoketest] dimType: skyLight={} ceiling={} ambient={} minY={} height={}",
                     deep.dimensionType().hasSkyLight(),
                     deep.dimensionType().hasCeiling(),
@@ -921,11 +880,11 @@ public final class DeepSeaEvents {
                     deep.dimensionType().minY(),
                     deep.dimensionType().height());
             BarotraumaMod.LOGGER.info("[smoketest] biome at outpost = {}",
-                    deep.getBiome(new BlockPos(0, -150, 0)).unwrapKey()
+                    deep.getBiome(new BlockPos(0, ModDimensions.OUTPOST_Y, 0)).unwrapKey()
                             .map(key -> key.location().toString()).orElse("?"));
-            BarotraumaMod.LOGGER.info("[smoketest] light at (0,-150,0): sky={} block={}",
-                    deep.getBrightness(LightLayer.SKY, new BlockPos(0, -150, 0)),
-                    deep.getBrightness(LightLayer.BLOCK, new BlockPos(0, -150, 0)));
+            BarotraumaMod.LOGGER.info("[smoketest] light at (0,{},0): sky={} block={}", ModDimensions.OUTPOST_Y,
+                    deep.getBrightness(LightLayer.SKY, new BlockPos(0, ModDimensions.OUTPOST_Y, 0)),
+                    deep.getBrightness(LightLayer.BLOCK, new BlockPos(0, ModDimensions.OUTPOST_Y, 0)));
         }
         if (!marker.delete()) {
             BarotraumaMod.LOGGER.warn("[smoketest] 无法删除标记文件 {}", marker.getAbsolutePath());
@@ -944,6 +903,15 @@ public final class DeepSeaEvents {
         // 物理船：补挂上一 tick 没挂上的推进器（VS2 装配后要过一 tick 才认这艘船）
         if (VsSupport.available()) {
             VsPilot.tick();
+        }
+        // 隔离场景（.smoketest-vs）：自己管自己的节奏，跑完关服
+        if (VsFloodSmoke.active()) {
+            net.minecraft.server.level.ServerLevel deep =
+                    event.getServer().getLevel(ModDimensions.THE_DEEP);
+            if (deep != null && VsFloodSmoke.tick(deep)) {
+                event.getServer().halt(false);
+            }
+            return;
         }
         if (smokeTicks <= 0) {
             return;
@@ -979,8 +947,13 @@ public final class DeepSeaEvents {
         if (deep == null) {
             return;
         }
-        java.util.Set<BlockPos> blocks = new java.util.LinkedHashSet<>(smokeCore.state().geometry().hull());
-        BarotraumaMod.LOGGER.info("[smoketest] {}", VsPilot.beginSmoke(deep, blocks));
+        // 用 collectBlocks（包围盒里所有船方块）而不是 geometry.hull()：声纳台往往挂在船壳外面，
+        // 不属于"最大连通分量"，用 hull() 装船会把它留在原地——那就是"船和声纳不是一体的"。
+        java.util.Set<BlockPos> blocks = smokeCore.state().collectBlocks(deep);
+        BarotraumaMod.LOGGER.info("[smoketest] 装船方块集 {} 格（hull {} 格）",
+                blocks.size(), smokeCore.state().geometry().hull().size());
+        BarotraumaMod.LOGGER.info("[smoketest] {}", VsPilot.beginSmoke(deep, blocks,
+                smokeCore.state(), smokeCore.getBlockPos()));
     }
 
     /** 兜底：万一维度被写在别处，也可以从主世界传送门坐标判断。 */

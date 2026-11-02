@@ -41,6 +41,14 @@ public class SonarScreen extends AbstractContainerScreen<SonarMenu> {
     private static final int COL_X = 242;
     private static final int COL_W = 250;
 
+    // ---- 翻页页签 ----
+    /** 页签宽/高/顶边距。 */
+    private static final int TAB_W = 62;
+    private static final int TAB_H = 16;
+    private static final int TAB_Y = 4;
+    /** 第 0 页是声纳（默认），第 1 页是核心。 */
+    private int page;
+
     // 控制盒的相对行高（相对各盒顶）
     private static final int SONAR_BOX_Y = 24;
     private static final int HELM_BOX_Y = 110;
@@ -223,10 +231,65 @@ public class SonarScreen extends AbstractContainerScreen<SonarMenu> {
             synced = true;
         }
         super.render(graphics, mouseX, mouseY, partialTick);
-        drawScope(graphics);
-        drawSonarBox(graphics);
-        drawHelmBox(graphics, mouseX, mouseY);
+        if (page == 0) {
+            drawScope(graphics);
+            drawSonarBox(graphics);
+            drawHelmBox(graphics, mouseX, mouseY);
+        } else {
+            drawCorePage(graphics);
+        }
+        drawTabs(graphics, mouseX, mouseY);
         drawFooter(graphics);
+    }
+
+    // ---------------------------------------------------------- 翻页
+
+    /** 顶部两个页签：声纳 / 核心。 */
+    private void drawTabs(GuiGraphics graphics, int mouseX, int mouseY) {
+        int x = leftPos + COL_X;
+        int y = topPos + TAB_Y;
+        String[] labels = {"声纳", "核心"};
+        for (int i = 0; i < labels.length; i++) {
+            boolean active = page == i;
+            boolean hover = mouseX >= x && mouseX < x + TAB_W && mouseY >= y && mouseY < y + TAB_H;
+            graphics.fill(x, y, x + TAB_W, y + TAB_H, active ? BTN_ON : (hover ? 0xFF39443B : BTN_BG));
+            graphics.fill(x, y + TAB_H - 1, x + TAB_W, y + TAB_H + 1, active ? ACCENT : BOX_EDGE);
+            graphics.drawCenteredString(font, labels[i], x + TAB_W / 2, y + 4,
+                    active ? TEXT : DIM);
+            x += TAB_W + 2;
+        }
+    }
+
+    /**
+     * 核心页：声纳台同时就是船核心，这一页讲这艘船本身。
+     *
+     * <p>内容由服务端拼成多行文本随声纳数据包一起下来（船体扫描 + 机器清单 + 实时状态），
+     * 客户端只负责换行和裁剪，避免把一堆数值字段再各开一条协议。</p>
+     */
+    private void drawCorePage(GuiGraphics graphics) {
+        int x = leftPos + 12;
+        int y = topPos + TAB_Y + TAB_H + 6;
+        int w = PANEL_W - 24;
+        int h = PANEL_H - (TAB_Y + TAB_H + 6) - 22;
+        graphics.fill(x, y, x + w, y + h, BOX_BG);
+        graphics.fill(x, y, x + w, y + 1, BOX_EDGE);
+        graphics.drawString(font, "船 核 心", x + 8, y + 6, ACCENT, false);
+
+        String core = ClientSonarCache.core();
+        if (core == null || core.isEmpty()) {
+            graphics.drawString(font, "等待核心数据…", x + 8, y + 22, DIM, false);
+            return;
+        }
+        int lineY = y + 22;
+        int bottom = y + h - 6;
+        for (String line : core.split("\n")) {
+            if (lineY > bottom) {
+                graphics.drawString(font, "…", x + 8, lineY, DIM, false);
+                break;
+            }
+            graphics.drawString(font, line, x + 8, lineY, TEXT, false);
+            lineY += 11;
+        }
     }
 
     // ---------------------------------------------------------- 左：示波器
@@ -701,6 +764,25 @@ public class SonarScreen extends AbstractContainerScreen<SonarMenu> {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // 页签优先：任何时候都能切页
+        if (button == 0) {
+            int tabX = leftPos + COL_X;
+            int tabY = topPos + TAB_Y;
+            if (mouseY >= tabY && mouseY < tabY + TAB_H) {
+                for (int i = 0; i < 2; i++) {
+                    int x0 = tabX + i * (TAB_W + 2);
+                    if (mouseX >= x0 && mouseX < x0 + TAB_W) {
+                        page = i;
+                        return true;
+                    }
+                }
+            }
+        }
+        // 核心页只展示数据，不响应示波器拖拽之类的操作
+        if (page == 1) {
+            return super.mouseClicked(mouseX, mouseY, button);
+        }
+
         int cx = leftPos + SCOPE_CX;
         int cy = topPos + SCOPE_CY;
         double ox = mouseX - cx;

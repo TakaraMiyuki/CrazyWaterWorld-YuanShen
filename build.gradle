@@ -3,6 +3,7 @@ plugins {
     id 'idea'
     id 'maven-publish'
     id 'net.minecraftforge.gradle' version '6.0.54'
+    id 'org.spongepowered.mixin' version '0.7.+'
 }
 
 version = mod_version
@@ -40,6 +41,8 @@ minecraft {
         }
 
         client {
+            // 独立运行目录：和服务端同时跑时不能共用 run/（否则 mods、日志、NBT 全打架）
+            workingDirectory project.file('run-client')
             property 'forge.enabledGameTestNamespaces', mod_id
         }
 
@@ -111,6 +114,12 @@ dependencies {
     runtimeOnly fg.deobf("maven.modrinth:valkyrien-skies:${vs2_version}")
     // VS2 的类是用 Kotlin 写的，但 jar 里没有 kotlin-stdlib，必须另外装 Kotlin for Forge。
     runtimeOnly fg.deobf("maven.modrinth:kotlin-for-forge:${kff_version}")
+
+    // ---- 测试（按 minecraft-testing 技能的三层策略，见 PLAN.md §10.37）----
+    // L1：纯逻辑单测。ShipPhysics / ShipGeometry / ShipSimulation 都是不依赖 Level 的
+    // 纯计算类，能在没有 Minecraft 引导的情况下跑，所以放 JUnit Jupiter。
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -138,6 +147,15 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// L1 单测：must 能用 `gradlew test` 跑，不需要开游戏。
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
+}
+
 tasks.named('jar', Jar).configure {
     manifest {
         attributes([
@@ -149,4 +167,9 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Vendor'   : mod_authors
         ])
     }
+}
+
+mixin {
+    add sourceSets.main, "barotrauma.refmap.json"
+    config "barotrauma.mixins.json"
 }

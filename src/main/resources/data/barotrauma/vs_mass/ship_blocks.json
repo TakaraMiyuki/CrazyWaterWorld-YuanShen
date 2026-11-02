@@ -1,0 +1,32 @@
+[
+  {
+    "block": "barotrauma:submarine_plating",
+    "mass": 7850.0,
+    "friction": 0.2,
+    "elasticity": 0.05
+  },
+  {
+    "block": "barotrauma:station_plating",
+    "mass": 7850.0,
+    "friction": 0.2,
+    "elasticity": 0.05
+  },
+  {
+    "block": "barotrauma:hull_glass",
+    "mass": 2600.0,
+    "friction": 0.1,
+    "elasticity": 0.1
+  },
+  {
+    "block": "barotrauma:test_hull",
+    "mass": 2000.0,
+    "friction": 0.15,
+    "elasticity": 0.1
+  },
+  {
+    "block": "barotrauma:sonar",
+    "mass": 300.0,
+    "friction": 0.3,
+    "elasticity": 0.02
+  }
+]

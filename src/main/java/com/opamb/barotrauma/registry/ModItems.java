@@ -34,16 +34,9 @@ public final class ModItems {
 
     // ---- M3 潜艇方块 ----
     public static final RegistryObject<Item> HULL_GLASS = blockItem("hull_glass", ModShipBlocks.HULL_GLASS);
-    public static final RegistryObject<Item> HATCH = blockItem("hatch", ModShipBlocks.HATCH);
-    public static final RegistryObject<Item> AIRLOCK_DOOR = blockItem("airlock_door", ModShipBlocks.AIRLOCK_DOOR);
-    public static final RegistryObject<Item> NUCLEAR_REACTOR = blockItem("nuclear_reactor", ModShipBlocks.NUCLEAR_REACTOR);
-    public static final RegistryObject<Item> OXYGEN_GENERATOR = blockItem("oxygen_generator", ModShipBlocks.OXYGEN_GENERATOR);
-    public static final RegistryObject<Item> ENGINE = blockItem("engine", ModShipBlocks.ENGINE);
-    public static final RegistryObject<Item> BALLAST_TANK = blockItem("ballast_tank", ModShipBlocks.BALLAST_TANK);
-    public static final RegistryObject<Item> PUMP = blockItem("pump", ModShipBlocks.PUMP);
+    /** 测试用透明船壳（调试专用）。 */
+    public static final RegistryObject<Item> TEST_HULL = blockItem("test_hull", ModShipBlocks.TEST_HULL);
     public static final RegistryObject<Item> SONAR = blockItem("sonar", ModShipBlocks.SONAR);
-    public static final RegistryObject<Item> HELM = blockItem("helm", ModShipBlocks.HELM);
-    public static final RegistryObject<Item> SHIP_CORE = blockItem("ship_core", ModShipBlocks.SHIP_CORE);
     public static final RegistryObject<Item> STATION_PLATING = blockItem("station_plating", ModShipBlocks.STATION_PLATING);
 
     private ModItems() {

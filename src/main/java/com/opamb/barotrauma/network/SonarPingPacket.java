@@ -53,7 +53,10 @@ public record SonarPingPacket(BlockPos sonarPos, int range, int mode, float aimX
             }
             ServerLevel level = player.serverLevel();
             // 船在开动，声纳台方块会跟着挪；坐标对不上时以玩家为准（玩家在船里）
-            BlockPos center = level.getBlockState(sonarPos).is(ModShipBlocks.SONAR.get())
+            // 物理船：声纳台的方块坐标是 VS2 的"船坞坐标"，拿它去扫世界只会扫到船坞，
+            // 玩家自己在船上、坐标已经是世界坐标，直接用玩家的。
+            boolean physical = com.opamb.barotrauma.ship.vs.VsState.active();
+            BlockPos center = !physical && level.getBlockState(sonarPos).is(ModShipBlocks.SONAR.get())
                     ? sonarPos : player.blockPosition();
 
             ShipCoreBlockEntity core = ShipCores.resolve(level, null, center);
@@ -65,7 +68,7 @@ public record SonarPingPacket(BlockPos sonarPos, int range, int mode, float aimX
                 // 装了 VS2：船方块进了刚体，世界里找不到核心，用物理船那份状态
                 ship = com.opamb.barotrauma.ship.vs.VsPilot.state();
             }
-            Set<BlockPos> hull = ship == null ? null : ship.geometry().hull();
+            Set<BlockPos> hull = ship == null ? null : hullForSonar(ship);
 
             SonarScan.Mode scanMode = SonarScan.Mode.byOrdinal(mode);
             // 被动模式没有回波，射程由船有多吵决定：反应堆出力 + 引擎在不在推
@@ -116,9 +119,52 @@ public record SonarPingPacket(BlockPos sonarPos, int range, int mode, float aimX
                     hasTarget ? target.getX() - base.getX() : 0,
                     hasTarget ? target.getY() - base.getY() : 0,
                     hasTarget ? target.getZ() - base.getZ() : 0,
-                    statusText(ship, center, scanMode, frame.range())));
+                    statusText(ship, center, scanMode, frame.range()),
+                    coreText(ship)));
         });
         context.setPacketHandled(true);
+    }
+
+    /**
+     * 声纳要显示的船体点。
+     *
+     * <p>物理船的船体方块在船坞坐标里，而声纳是以玩家（船）为中心扫世界——
+     * 不把船体点按船的整数位移搬过去，画面上那团绿色船体就会留在装配时的老位置，
+     * 看起来就是"声纳里的船不跟着船走"。</p>
+     */
+    private static Set<BlockPos> hullForSonar(ShipState ship) {
+        Set<BlockPos> raw = ship.geometry().hull();
+        if (!com.opamb.barotrauma.ship.vs.VsState.active()) {
+            return raw;
+        }
+        int dx = com.opamb.barotrauma.ship.vs.VsState.offsetX();
+        int dy = com.opamb.barotrauma.ship.vs.VsState.offsetY();
+        int dz = com.opamb.barotrauma.ship.vs.VsState.offsetZ();
+        if (dx == 0 && dy == 0 && dz == 0) {
+            return raw;
+        }
+        Set<BlockPos> out = new java.util.HashSet<>(raw.size());
+        for (BlockPos pos : raw) {
+            out.add(pos.offset(dx, dy, dz));
+        }
+        return out;
+    }
+
+    /**
+     * 核心页正文。
+     *
+     * <p>声纳台现在兼任船核心，所以"核心"这一页讲的就是这艘船本身：
+     * 船体扫描结果（舱室、方块数、密闭）+ 机器清单 + 实时状态。</p>
+     */
+    private static String coreText(ShipState ship) {
+        if (ship == null) {
+            return "未接入船核心\n\n声纳台就是船核心：把它装进船体内部，右键即可接管这艘船。";
+        }
+        // 明确告诉玩家现在哪一套移动系统在跑——两套同时跑过一次就够了
+        String drive = com.opamb.barotrauma.ship.vs.VsState.active()
+                ? "驱动：VS2 物理刚体（方块推进已停用，姿态锁定水平）"
+                : "驱动：方块推进（离散落格，未物理化）";
+        return ship.summary().getString() + "\n" + ship.liveReport().getString() + "\n" + drive;
     }
 
     /** 船越吵，被动声纳听得越远（wiki：range of passive sonar is dependent on how loud the submarine is）。 */

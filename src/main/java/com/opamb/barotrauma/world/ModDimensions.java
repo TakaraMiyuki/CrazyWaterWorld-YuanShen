@@ -32,11 +32,11 @@ public final class ModDimensions {
     public static final int WATER_BOTTOM_Y = -1000;
     public static final int SEABED_TOP_Y = -1001;
 
-    // ---- 新手哨站 ----
+    // ---- 新手哨站（挂在第一层顶板岩壁下方，y 范围见 OutpostBuilder.MIN_Y/MAX_Y）----
     public static final int OUTPOST_X = 0;
     public static final int OUTPOST_Z = 0;
-    public static final int OUTPOST_Y = -150;
-    public static final int OUTPOST_SPAWN_Y = -158;
+    public static final int OUTPOST_Y = -54;
+    public static final int OUTPOST_SPAWN_Y = -62;
 
     /** 深度换算：1 格 = 1 米。 */
     public static int toMeters(int y) {

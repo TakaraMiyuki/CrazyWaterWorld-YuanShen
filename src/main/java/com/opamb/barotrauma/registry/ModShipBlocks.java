@@ -1,9 +1,8 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
-import com.opamb.barotrauma.block.ShipCoreBlock;
-import com.opamb.barotrauma.block.ShipDoorBlock;
 import com.opamb.barotrauma.block.SonarBlock;
+import com.opamb.barotrauma.block.SonarProxyBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
@@ -15,7 +14,11 @@ import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.registries.RegistryObject;
 
 /**
- * 潜艇方块注册表：船体、舱门、七台机器。
+ * 潜艇方块注册表：船体 + 声纳台（船脑）。
+ *
+ * <p>2026-11-02 按用户要求清理：五台机器（反应堆 / 制氧机 / 引擎 / 压载舱 / 水泵）
+ * 和舱门 / 舱口全部删除——它们除了"被模拟计数"之外没有任何实现，放在船上纯属装饰。
+ * 现在船上只有船壳、舷窗和声纳台；开船靠 VS2 物理刚体。</p>
  */
 public final class ModShipBlocks {
 
@@ -30,40 +33,70 @@ public final class ModShipBlocks {
                     .sound(SoundType.GLASS)
                     .noOcclusion()));
 
-    public static final RegistryObject<Block> HATCH = BLOCKS.register("hatch",
-            () -> new ShipDoorBlock(machine()));
+    /**
+     * 测试用透明船壳（调试专用）。
+     *
+     * <p>改物理船的时候看不见船里面，只能靠 `/barotrauma ship vs status` 猜。
+     * 这块方块就是"玻璃装甲板"：和装甲板一样算船体、能被 VS2 收进刚体，
+     * 但渲染成全透明，站在船里也能直接看到船壳和方块边界。
+     * 初始潜艇的船壳用它造，方便肉眼验证"船和声纳是不是一体的"。</p>
+     */
+    public static final RegistryObject<Block> TEST_HULL = BLOCKS.register("test_hull",
+            () -> new Block(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.COLOR_LIGHT_BLUE)
+                    .strength(2.0F)
+                    .sound(SoundType.GLASS)
+                    .noOcclusion()
+                    .isViewBlocking((state, level, pos) -> false)
+                    .isSuffocating((state, level, pos) -> false)));
 
-    public static final RegistryObject<Block> AIRLOCK_DOOR = BLOCKS.register("airlock_door",
-            () -> new ShipDoorBlock(machine()));
-
-    // ---- 机器 ----
-    public static final RegistryObject<Block> NUCLEAR_REACTOR = BLOCKS.register("nuclear_reactor",
-            () -> new Block(machine()));
-
-    public static final RegistryObject<Block> OXYGEN_GENERATOR = BLOCKS.register("oxygen_generator",
-            () -> new Block(machine()));
-
-    public static final RegistryObject<Block> ENGINE = BLOCKS.register("engine",
-            () -> new Block(machine()));
-
-    public static final RegistryObject<Block> BALLAST_TANK = BLOCKS.register("ballast_tank",
-            () -> new Block(machine()));
-
-    public static final RegistryObject<Block> PUMP = BLOCKS.register("pump",
-            () -> new Block(machine()));
-
-    /** 声纳：带 3D 全息投影的方块实体。 */
+    /** 声纳：带 3D 全息投影的方块实体。**同时兼任船核心**（见 SonarBlockEntity）。 */
     public static final RegistryObject<SonarBlock> SONAR = BLOCKS.register("sonar",
             () -> new SonarBlock(machine()));
 
-    public static final RegistryObject<Block> HELM = BLOCKS.register("helm",
-            () -> new Block(machine()));
+    /**
+     * 物理船声纳的交互锚点（不可见 / 不碰撞 / 不可破坏）。
+     *
+     * <p>VS2 2.4.11 船上不能右键方块，而声纳又必须能点开。装配后把这块方块放在
+     * 声纳原来的位置（跟着船整格移动），右键它直接打开声纳界面。不属于船体方块，
+     * 不会被船体扫描或二次装配收走。</p>
+     */
+    public static final RegistryObject<Block> SONAR_PROXY = BLOCKS.register("sonar_proxy",
+            () -> new SonarProxyBlock(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.NONE)
+                    .strength(-1.0F, 3600000.0F)
+                    .noLootTable()
+                    .noOcclusion()
+                    .noCollission()
+                    .isViewBlocking((state, level, pos) -> false)
+                    .isSuffocating((state, level, pos) -> false)));
 
-    /** 船核心：扫描船体、划分舱室。 */
-    public static final RegistryObject<ShipCoreBlock> SHIP_CORE = BLOCKS.register("ship_core",
-            () -> new ShipCoreBlock(machine()));
+    /**
+     * 物理船的"排水体"（内部方块，玩家拿不到）。
+     *
+     * <p>VS2 装船会把船体方块从世界里挖走，海里那一块空腔立刻被海水灌满——透过船壳看
+     * 就是"船舱里全是水"。装船后用这个方块把船占的包围盒填死，水就进不来了。</p>
+     *
+     * <p>三个必须同时满足的性质：</p>
+     * <ul>
+     *   <li>{@code noOcclusion} + 模型里没有 element → <b>完全不可见</b>；</li>
+     *   <li>{@code noCollission} → <b>不挡玩家</b>，船里照常走动；</li>
+     *   <li>是普通方块、不可替换 → <b>挡水</b>，空腔里一直是空气。</li>
+     * </ul>
+     * <p><b>它不算船体方块</b>（不在 {@link #isShipBlock} 里），否则船体扫描会把排水体
+     * 当成船壳，越扫越大。</p>
+     */
+    public static final RegistryObject<Block> HULL_PLUG = BLOCKS.register("hull_plug",
+            () -> new Block(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.NONE)
+                    .strength(-1.0F, 3600000.0F)
+                    .noLootTable()
+                    .noOcclusion()
+                    .noCollission()
+                    .isViewBlocking((state, level, pos) -> false)
+                    .isSuffocating((state, level, pos) -> false)));
 
-    /** 站点装甲：前哨站专用，**不算船体**，避免把空间站识别成船。 */
+
     public static final RegistryObject<Block> STATION_PLATING = BLOCKS.register("station_plating",
             () -> new Block(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_BLACK)
@@ -74,38 +107,21 @@ public final class ModShipBlocks {
     private ModShipBlocks() {
     }
 
-    /** 机器类型，用于船体扫描统计。 */
+    /** 机器类型，用于船体扫描统计（现在只剩声纳）。 */
     public enum Machine {
-        NONE, REACTOR, OXYGEN, ENGINE, PUMP, BALLAST, AIRLOCK, SONAR, HELM
+        NONE, SONAR
     }
 
     public static Machine machineOf(BlockState state) {
         Block block = state.getBlock();
-        if (block == NUCLEAR_REACTOR.get()) {
-            return Machine.REACTOR;
-        } else if (block == OXYGEN_GENERATOR.get()) {
-            return Machine.OXYGEN;
-        } else if (block == ENGINE.get()) {
-            return Machine.ENGINE;
-        } else if (block == PUMP.get()) {
-            return Machine.PUMP;
-        } else if (block == BALLAST_TANK.get()) {
-            return Machine.BALLAST;
-        } else if (block == AIRLOCK_DOOR.get()) {
-            return Machine.AIRLOCK;
-        } else if (block == SONAR.get()) {
+        if (block == SONAR.get()) {
             return Machine.SONAR;
-        } else if (block == HELM.get()) {
-            return Machine.HELM;
         }
         return Machine.NONE;
     }
 
-    /** 对"分舱"而言是否算墙：开着的舱门不算墙（舱室连通）。 */
+    /** 对"分舱"而言是否算墙。 */
     public static boolean isSolidForShip(BlockState state) {
-        if (state.getBlock() instanceof ShipDoorBlock door && state.getValue(ShipDoorBlock.OPEN)) {
-            return false;
-        }
         return !state.isAir() && state.getFluidState().isEmpty();
     }
 
@@ -113,15 +129,8 @@ public final class ModShipBlocks {
     public static boolean isShipBlock(BlockState state) {
         Block block = state.getBlock();
         return block == HULL_GLASS.get()
-                || block == HATCH.get()
-                || block == AIRLOCK_DOOR.get()
-                || block == NUCLEAR_REACTOR.get()
-                || block == OXYGEN_GENERATOR.get()
-                || block == ENGINE.get()
-                || block == BALLAST_TANK.get()
-                || block == PUMP.get()
+                || block == TEST_HULL.get()
                 || block == SONAR.get()
-                || block == HELM.get()
                 || block == ModBlocks.SUBMARINE_PLATING.get();
     }
 

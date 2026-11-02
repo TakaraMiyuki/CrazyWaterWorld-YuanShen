@@ -142,12 +142,16 @@ public class DeepSeaChunkGenerator extends ChunkGenerator {
             for (int lz = 0; lz < 16; lz++) {
                 int x = originX + lx;
                 int z = originZ + lz;
-                // 这一列岩层有多厚（占层高的比例），随水平位置起伏，所以岩壁是波浪形的
-                double rock = ROCK_FRACTION + ROCK_WOBBLE
-                        * DeepSeaNoise.fbm3(seed ^ SALT_LAYER, x / 90.0D, 0.0D, z / 90.0D, 2);
-                // 上下交错的岩柱：噪声高的地方从天花板垂下来，低的地方从地面升起来
+                // 这一列岩层有多厚（占层高的比例），随水平位置起伏，所以岩壁是波浪形的；
+                // 哨站上方压平成最薄值，让哨站顶部与顶板底面严丝合缝（见 OutpostBuilder）
+                boolean flatRoof = OutpostBuilder.inRoofFlattenZone(x, z);
+                double rock = flatRoof
+                        ? OutpostBuilder.FLAT_ROOF_FRACTION
+                        : ROCK_FRACTION + ROCK_WOBBLE
+                                * DeepSeaNoise.fbm3(seed ^ SALT_LAYER, x / 90.0D, 0.0D, z / 90.0D, 2);
+                // 上下交错的岩柱：噪声高的地方从天花板垂下来，低的地方从地面升起来（压平区无岩柱）
                 double pillar = DeepSeaNoise.fbm3(seed ^ SALT_PILLAR, x / 42.0D, 0.0D, z / 42.0D, 2);
-                double hanging = Math.max(0.0D, pillar - 0.30D) * PILLAR_REACH / 0.70D;
+                double hanging = flatRoof ? 0.0D : Math.max(0.0D, pillar - 0.30D) * PILLAR_REACH / 0.70D;
                 double rising = Math.max(0.0D, -pillar - 0.30D) * PILLAR_REACH / 0.70D;
                 double roof = rock + hanging;
                 double floor = 1.0D - rock - rising;

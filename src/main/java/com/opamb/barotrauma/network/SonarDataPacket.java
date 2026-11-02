@@ -15,7 +15,7 @@ import java.util.function.Supplier;
  */
 public record SonarDataPacket(int range, int[] points, int power, int hx, int hy, int hz,
                               int mode, int depth, int speedTenths, int diveTenths, int autopilot,
-                              boolean hasTarget, int tx, int ty, int tz, String status) {
+                              boolean hasTarget, int tx, int ty, int tz, String status, String core) {
 
     public void encode(FriendlyByteBuf buf) {
         buf.writeVarInt(range);
@@ -36,6 +36,7 @@ public record SonarDataPacket(int range, int[] points, int power, int hx, int hy
             buf.writeVarInt(tz);
         }
         buf.writeUtf(status, 512);
+        buf.writeUtf(core, 1024);
     }
 
     public static SonarDataPacket decode(FriendlyByteBuf buf) {
@@ -60,14 +61,15 @@ public record SonarDataPacket(int range, int[] points, int power, int hx, int hy
             tz = buf.readVarInt();
         }
         String status = buf.readUtf(512);
+        String core = buf.readUtf(1024);
         return new SonarDataPacket(range, points, power, hx, hy, hz, mode, depth, speed, dive,
-                autopilot, hasTarget, tx, ty, tz, status);
+                autopilot, hasTarget, tx, ty, tz, status, core);
     }
 
     public void handle(Supplier<NetworkEvent.Context> supplier) {
         NetworkEvent.Context context = supplier.get();
         context.enqueueWork(() -> ClientSonarCache.accept(range, points, power, hx, hy, hz,
-                mode, depth, speedTenths, diveTenths, autopilot, hasTarget, tx, ty, tz, status));
+                mode, depth, speedTenths, diveTenths, autopilot, hasTarget, tx, ty, tz, status, core));
         context.setPacketHandled(true);
     }
 }

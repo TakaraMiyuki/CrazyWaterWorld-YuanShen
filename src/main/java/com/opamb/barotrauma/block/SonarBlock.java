@@ -47,9 +47,12 @@ public class SonarBlock extends BaseEntityBlock {
     @Nullable
     @Override
     public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> type) {
-        return level.isClientSide
-                ? createTickerHelper(type, ModBlockEntities.SONAR.get(), SonarBlockEntity::clientTick)
-                : null;
+        if (level.isClientSide) {
+            return createTickerHelper(type, ModBlockEntities.SONAR.get(), SonarBlockEntity::clientTick);
+        }
+        // 服务端：声纳台就是船脑（SonarBlockEntity extends ShipCoreBlockEntity），
+        // 船体模拟、推进、水位都跑在这个 tick 里
+        return createTickerHelper(type, ModBlockEntities.SONAR.get(), ShipCoreBlockEntity::serverTick);
     }
 
     @Override

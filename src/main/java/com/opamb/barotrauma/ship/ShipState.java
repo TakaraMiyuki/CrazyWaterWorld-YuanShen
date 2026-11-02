@@ -11,7 +11,7 @@ import java.util.Locale;
  */
 public final class ShipState {
 
-    private final ShipGeometry.Result geometry;
+    private ShipGeometry.Result geometry;
     private final MachineCount machines;
     private ShipSimulation simulation;
     private ShipWater water;
@@ -19,7 +19,7 @@ public final class ShipState {
     private int throttleY;
     private int throttleZ;
     private int moveTimer;
-    /** 连续运动模型：速度、惯性、浮力。落格才交给 {@link ShipMover}。 */
+    /** 连续运动模型：记录物理船回写的速度（方块船自己不再移动）。 */
     private ShipPhysics physics = new ShipPhysics();
     /** 推进功率 5..100（%），决定每秒挪几格。 */
     private int power = 100;
@@ -43,6 +43,25 @@ public final class ShipState {
 
     public List<ShipGeometry.Compartment> compartments() {
         return geometry.compartments();
+    }
+
+    /**
+     * 船体破损后替换几何（舱室 / 连海空腔全部重算）。
+     *
+     * <p>模拟对象要重建（舱室数组长度变了），但反应堆、压载、水泵这些设置
+     * 从旧实例拷过来；密封舱室里的旧水不保留——破口舱室会从 0 开始由海水灌入，
+     * 这比"把旧水位硬塞进新舱室"的行为可预期。</p>
+     */
+    public void replaceGeometry(ShipGeometry.Result next) {
+        ShipSimulation old = this.simulation;
+        double oldSealedWater = old == null ? 0.0D : old.waterUnits();
+        double oldPocketWater = old == null ? 0.0D : old.pocketWaterTotal();
+        this.geometry = next;
+        this.simulation = new ShipSimulation(next, machines);
+        this.simulation.copySettingsFrom(old);
+        // 连续砸洞时水位不能归零：把旧水量按新几何的容积重新分配
+        this.simulation.seedWater(oldSealedWater, oldPocketWater);
+        this.water = null;
     }
 
     public ShipSimulation simulation() {
@@ -150,6 +169,59 @@ public final class ShipState {
         throttleZ = Math.abs(dz) >= 3 ? Integer.signum(dz) : 0;
     }
 
+    /**
+     * 物理船用：自动驾驶朝目标点推一步（写 throttle，但不经过 {@link #setThrottle}，
+     * 否则会被当成手动操舵、把自动驾驶关掉）。
+     *
+     * @param currentPos 船（声纳）当前的世界坐标
+     */
+    /**
+     * 物理船用：自动驾驶朝目标点推一步，**带惯性补偿**。
+     *
+     * <p>旧版只按"目标在哪边"给 ±1 推力，船有速度时会在目标附近来回过冲。
+     * 现在按物理船的 PD 控制：期望速度 = 位置误差 × 增益（限幅），
+     * 推力方向 = 期望速度 − 当前速度，所以接近目标时会提前反向刹车。</p>
+     *
+     * <p>不经过 {@link #setThrottle}，否则会被当成手动操舵、把自动驾驶关掉。</p>
+     */
+    public void autopilotStep(double x, double y, double z,
+                             double vx, double vy, double vz) {
+        if (!autopilotHold || autopilotTarget == null) {
+            return;
+        }
+        // 推进器满功率能给出的速度（和 VsThruster 的 ACCEL 匹配）
+        double maxHorizontal = 6.0D;
+        double maxVertical = 2.5D;
+        double gain = 0.5D;
+        double deadband = 0.15D;
+
+        double ex = autopilotTarget.getX() + 0.5D - x;
+        double ey = autopilotTarget.getY() + 0.5D - y;
+        double ez = autopilotTarget.getZ() + 0.5D - z;
+
+        double dvx = clamp(ex * gain, -maxHorizontal, maxHorizontal) - vx;
+        double dvy = clamp(ey * gain, -maxVertical, maxVertical) - vy;
+        double dvz = clamp(ez * gain, -maxHorizontal, maxHorizontal) - vz;
+
+        throttleX = Math.abs(dvx) > deadband ? (int) Math.signum(dvx) : 0;
+        throttleY = Math.abs(dvy) > deadband ? (int) Math.signum(dvy) : 0;
+        throttleZ = Math.abs(dvz) > deadband ? (int) Math.signum(dvz) : 0;
+
+        // 到点附近且基本停住：清掉目标，避免原地抖
+        if (Math.abs(ex) < 1.5D && Math.abs(ey) < 1.5D && Math.abs(ez) < 1.5D
+                && Math.abs(vx) + Math.abs(vy) + Math.abs(vz) < 0.6D) {
+            throttleX = 0;
+            throttleY = 0;
+            throttleZ = 0;
+            autopilotTarget = null;
+            autopilotHold = false;
+        }
+    }
+
+    private static double clamp(double v, double min, double max) {
+        return v < min ? min : Math.min(v, max);
+    }
+
     public boolean throttled() {
         return throttleX != 0 || throttleY != 0 || throttleZ != 0;
     }
@@ -231,15 +303,20 @@ public final class ShipState {
     }
 
     /** 舱室总进水比例（0..1），用于让灌了水的船往下沉。 */
-    private double floodRatio() {
+    public double floodRatio() {
+        // 分母必须把"连海空腔"也算上：舱室破洞后会从 compartments 移到 openPockets，
+        // 只数密闭舱室的话，整艘船灌满水时比例反而是 0，物理上不会下沉。
         double volume = 0.0D;
         for (ShipGeometry.Compartment compartment : compartments()) {
             volume += compartment.volume();
         }
+        for (ShipGeometry.Compartment pocket : geometry.openPockets()) {
+            volume += pocket.volume();
+        }
         if (volume <= 0.0D) {
             return 0.0D;
         }
-        double units = simulation().waterUnits();
+        double units = simulation().waterUnits() + simulation().pocketWaterTotal();
         double capacity = volume * ShipSimulation.UNITS_PER_BLOCK;
         return capacity <= 0.0D ? 0.0D : Math.min(1.0D, units / capacity);
     }
@@ -265,10 +342,10 @@ public final class ShipState {
     }
 
     /**
-     * 驾驶推进：先积分连续速度，攒够一格才真的挪一格。
+     * 方块船推进：先积分连续速度，攒够一格才真的挪一格。
      *
-     * <p>和上一版（每 4 tck 硬挪一格）的区别：油门是加速度不是瞬移，收油门后靠惯性滑行，
-     * 压载/进水会让船自己往下沉，撞墙只停撞上的那一轴（能贴墙滑）。</p>
+     * <p>2026-11-02 恢复：用户选择"方块留在世界里"的路线——船壳真挡水、能交互、能做破损。
+     * VS2 物理船代码保留但不再作为主路径。</p>
      */
     public net.minecraft.core.BlockPos tickMovement(net.minecraft.server.level.ServerLevel level,
                                                     net.minecraft.core.BlockPos corePos) {
@@ -287,8 +364,7 @@ public final class ShipState {
                     (autopilotTarget.getZ() - corePos.getZ()) * gain, -ShipPhysics.MAX_SPEED, ShipPhysics.MAX_SPEED);
             physics.tickAuto(dt, tx, ty, tz);
         } else {
-            double ballast = simulation().report().ballastPercent();
-            physics.tickManual(dt, throttleX, throttleY, throttleZ, power, ballast, floodRatio());
+            physics.tickManual(dt, throttleX, throttleY, throttleZ, power, 0.0D, floodRatio());
         }
         return applyStep(level, corePos);
     }
@@ -323,13 +399,11 @@ public final class ShipState {
             return corePos.offset(dx, dy, dz);
         }
         int axis = dx != 0 ? 0 : dy != 0 ? 1 : 2;
-        // 撞得轻只停下，撞得狠才掉船体：慢慢沉到海床上不该把船底啃穿
         double hitSpeed = Math.abs(physics.speedOn(axis));
         physics.blocked(axis);
         if (hitSpeed > 1.0D) {
             damageFront(level, dx, dy, dz);
         }
-        // 撞上的那一轴收油：不收的话船会一直顶着墙"啃"自己的船体（一顶掉一格）
         if (axis == 0) {
             throttleX = 0;
         } else if (axis == 1) {
@@ -338,7 +412,6 @@ public final class ShipState {
             throttleZ = 0;
         }
         if (autopilotHold) {
-            // 自动驾驶一头顶在墙上就放弃目标，别一直啃船体
             autopilotTarget = null;
         }
         return corePos;
@@ -371,7 +444,25 @@ public final class ShipState {
         return water.apply(level);
     }
 
-    /** 静态摘要：舱室 + 机器。 */
+    /**
+     * 把舱内（和连海空腔）的水方块全部清掉。
+     *
+     * <p>装成物理船之前必须调一次：VS2 的装配集合只有"船体方块"，舱内的水不在里面，
+     * 会原地剩下一坨水——看起来就是"船没了、水灌进来了"。拆船的时候也不该带着水回来。</p>
+     */
+    public int clearWater(net.minecraft.world.level.Level level) {
+        return clearWater(level, 0, 0, 0);
+    }
+
+    /** 带整数位移的舱室排水（拆船铺回方块后，位置 = 原坐标 + 船位移）。 */
+    public int clearWater(net.minecraft.world.level.Level level, int dx, int dy, int dz) {
+        if (water == null) {
+            water = new ShipWater(geometry, simulation());
+        }
+        return water.clear(level, dx, dy, dz);
+    }
+
+    /** 静态摘要：舱室 + 设备。机器方块已删除，只报声纳和舱室。 */
     public Component summary() {
         StringBuilder sb = new StringBuilder();
         sb.append("船体扫描：").append(geometry.compartments().size()).append(" 个舱室");
@@ -381,7 +472,7 @@ public final class ShipState {
         Component head = Component.literal(sb.toString())
                 .withStyle(geometry.sealed() ? ChatFormatting.AQUA : ChatFormatting.GOLD);
 
-        Component body = Component.literal("\n  机器：" + machines.describe()).withStyle(ChatFormatting.GRAY);
+        Component body = Component.literal("\n  设备：" + machines.describe()).withStyle(ChatFormatting.GRAY);
         int index = 1;
         for (ShipGeometry.Compartment compartment : compartments()) {
             int waterPercent = (int) Math.round(compartment.waterRatio() * 100.0D);
@@ -392,24 +483,14 @@ public final class ShipState {
         return head.copy().append(body);
     }
 
-    /** 当前实时数值（不推进时间），用于面板/命令。 */
+    /** 当前实时数值（不推进时间），用于面板/命令。机器删了，只报水、航向和推力。 */
     public Component liveReport() {
         ShipSimulation.Report report = simulation().report();
-        String phase = switch (report.airlockPhase()) {
-            case DRAINING -> "抽干中";
-            case FLOODING -> "注水中";
-            default -> "关闭";
-        };
         String text = String.format(Locale.ROOT,
-                "实时｜温度 %.0f°C｜功率 %.0f/%.0f kW｜氧气 %d%%｜舱内水 %.0f｜压载 %d%%｜气闸 %d%%(%s)｜%s %d%%",
-                report.temperature(), report.powerOutput(), report.powerDemand(),
-                (int) Math.round(report.oxygenPercent() * 100.0D), report.waterUnits(),
-                (int) Math.round(report.ballastPercent() * 100.0D),
-                (int) Math.round(report.airlockPercent() * 100.0D), phase,
+                "实时｜舱内水 %.0f 单位｜进水 %d%%｜%s %d%%",
+                report.waterUnits(), (int) Math.round(floodRatio() * 100.0D),
                 headingName(), power);
-        ChatFormatting color = report.meltingDown() ? ChatFormatting.RED
-                : report.overheated() ? ChatFormatting.GOLD : ChatFormatting.GREEN;
-        return Component.literal(text).withStyle(color);
+        return Component.literal(text).withStyle(ChatFormatting.GREEN);
     }
 
     /** 快进 {@code seconds} 秒（固定 0.1 s 步长），返回一行报告。 */

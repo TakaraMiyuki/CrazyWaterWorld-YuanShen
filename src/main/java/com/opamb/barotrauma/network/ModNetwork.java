@@ -29,6 +29,12 @@ public final class ModNetwork {
                 SonarPingPacket::encode, SonarPingPacket::decode, SonarPingPacket::handle);
         CHANNEL.registerMessage(nextId++, SonarDataPacket.class,
                 SonarDataPacket::encode, SonarDataPacket::decode, SonarDataPacket::handle);
+        CHANNEL.registerMessage(nextId++, ShipWaterStatePacket.class,
+                ShipWaterStatePacket::encode, ShipWaterStatePacket::decode, ShipWaterStatePacket::handle);
+    }
+
+    public static <MSG> void sendToAll(MSG message) {
+        CHANNEL.send(net.minecraftforge.network.PacketDistributor.ALL.noArg(), message);
     }
 
     public static <MSG> void sendToPlayer(net.minecraft.server.level.ServerPlayer player, MSG message) {

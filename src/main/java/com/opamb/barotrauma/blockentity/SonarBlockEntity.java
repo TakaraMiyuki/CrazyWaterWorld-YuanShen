@@ -11,15 +11,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 声纳方块实体。
+ * 声纳方块实体 —— 同时也是**船脑**。
  *
- * <p>M3 阶段先在客户端扫描：以声纳台为中心、{@link #RADIUS} 格为半径，
- * 每 {@link #STRIDE} 格采样一次，把非空气非水的方块记成点云，交给渲染器画成悬浮全息。
- * 后续接船网时改成服务端扫描 + 同步，避免客户端拿不到未加载区块。</p>
+ * <p>从这一版开始，船核心不再是一个独立的方块：{@code SonarBlockEntity} 直接继承
+ * {@link ShipCoreBlockEntity}，完整继承了船体扫描、分舱、水位模拟、推进这套逻辑。
+ * 这样声纳方块天然就是 {@code isShipBlock}，会被 {@code collectBlocks} 正常收进
+ * VS2 刚体，不会再出现"核心留在世界里把整艘船顶死"的问题。</p>
+ *
+ * <p>另外它还有自己的本职工作：以声纳台为中心、{@link #RADIUS} 格为半径做点云扫描，
+ * 交给渲染器画成悬浮全息。</p>
  */
-public class SonarBlockEntity extends BlockEntity {
+public class SonarBlockEntity extends ShipCoreBlockEntity {
 
-    /** 扫描半径（格）。 */
+    /** 点云扫描半径（格）。 */
     public static final int RADIUS = 40;
     /** 采样步长。 */
     public static final int STRIDE = 4;

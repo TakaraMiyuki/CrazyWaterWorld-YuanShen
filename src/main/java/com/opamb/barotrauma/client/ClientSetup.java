@@ -24,8 +24,8 @@ public final class ClientSetup {
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.HULL_GLASS.get(), RenderType.cutout());
-            net.minecraft.client.gui.screens.MenuScreens.register(
-                    com.opamb.barotrauma.registry.ModMenus.SHIP_CONSOLE.get(), ShipConsoleScreen::new);
+            // 测试船壳要真的透过去看见里面，cutout 只有全透明/全不透明两态，不够
+            ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.TEST_HULL.get(), RenderType.translucent());
             net.minecraft.client.gui.screens.MenuScreens.register(
                     com.opamb.barotrauma.registry.ModMenus.SONAR.get(), SonarScreen::new);
         });

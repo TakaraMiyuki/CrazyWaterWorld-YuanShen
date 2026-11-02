@@ -40,6 +40,11 @@ public class SonarMenu extends AbstractContainerMenu {
 
     @Override
     public boolean stillValid(Player player) {
+        // 物理船：声纳方块在 VS2 船坞区块，离玩家上百万格；界面靠命令打开，
+        // 只要玩家还在物理船状态里就允许（船开着坐标一直在动）。
+        if (com.opamb.barotrauma.ship.vs.VsState.active()) {
+            return true;
+        }
         return player.distanceToSqr(Vec3.atCenterOf(sonarPos)) <= 64.0D;
     }
 

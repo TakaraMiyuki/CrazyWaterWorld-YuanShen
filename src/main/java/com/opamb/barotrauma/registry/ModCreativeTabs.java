@@ -26,16 +26,8 @@ public final class ModCreativeTabs {
                         output.accept(ModItems.DIVING_KNIFE.get());
                         output.accept(ModItems.SUBMARINE_PLATING.get());
                         output.accept(ModItems.HULL_GLASS.get());
-                        output.accept(ModItems.HATCH.get());
-                        output.accept(ModItems.AIRLOCK_DOOR.get());
-                        output.accept(ModItems.NUCLEAR_REACTOR.get());
-                        output.accept(ModItems.OXYGEN_GENERATOR.get());
-                        output.accept(ModItems.ENGINE.get());
-                        output.accept(ModItems.BALLAST_TANK.get());
-                        output.accept(ModItems.PUMP.get());
+                        output.accept(ModItems.TEST_HULL.get());
                         output.accept(ModItems.SONAR.get());
-                        output.accept(ModItems.HELM.get());
-                        output.accept(ModItems.SHIP_CORE.get());
                         output.accept(ModItems.STATION_PLATING.get());
                     })
                     .build());

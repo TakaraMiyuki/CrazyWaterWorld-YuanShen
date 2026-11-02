@@ -22,6 +22,8 @@ public final class ClientSonarCache {
     private static int targetX;
     private static int targetY;
     private static int targetZ;
+    /** 核心页正文（服务端拼好的多行文本：船体扫描 + 机器 + 实时状态）。 */
+    private static String core = "";
     private static long stamp;
 
     private ClientSonarCache() {
@@ -29,7 +31,8 @@ public final class ClientSonarCache {
 
     public static void accept(int range, int[] points, int powerPercent, int hx, int hy, int hz,
                               int modeId, int depthMeters, int speed, int dive, int autopilotFlag,
-                              boolean targetSet, int tx, int ty, int tz, String statusText) {
+                              boolean targetSet, int tx, int ty, int tz, String statusText,
+                              String coreText) {
         frame = new SonarScan.Frame(range, points);
         power = powerPercent;
         headingX = hx;
@@ -45,7 +48,13 @@ public final class ClientSonarCache {
         targetY = ty;
         targetZ = tz;
         status = statusText;
+        core = coreText;
         stamp = System.currentTimeMillis();
+    }
+
+    /** 核心页正文（多行）。 */
+    public static String core() {
+        return core;
     }
 
     public static SonarScan.Frame frame() {
