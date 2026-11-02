@@ -1111,8 +1111,1404 @@ sonar 160m stride=13 -> terrain 872  cost 2.6 ms
 按事先说好的"1 轮打不通就回退"，**物理船这条线停在这里，方块船继续做主路径**。
 `/barotrauma ship vs *` 命令保留但标注实验性，不参与玩法。
 
+**物理船三个症状是同一件事**（用户实测：装了就进水、开不了、声纳空白）：
+
+`assembleToShip` 把方块**从世界里搬走**，原地只剩水 → 看起来就是"船没了、水灌进来了"；
+声纳扫的是世界方块，船体已经不在世界里 → 扫不到船；操舵依赖的船核心也进了刚体，
+`ShipCores.resolve` 找不到 → 开不动。三个现象同一个根因，不是三个 bug。
+
+所以 `vs launch` 现在**直接拒绝执行**，只打印原因和建议；真的要装得用
+`/barotrauma ship vs force`（仅调试用）。已经装过的船用 `vs dock` 拆回来。
+
+## 10.33 物理船（VS2）实测与源码查证（2026-11-01）
+
+### 查到了什么源码
+
+VS2 的**模组本体**是开源的（`github.com/ValkyrienSkies/Valkyrien-Skies-2`，分支 `1.20.1/main`），
+已克隆到 `_vs2src/`；但**物理内核 vs-core 不在这个仓库里**（`.gitmodules` 是空文件，
+README 里的 `--recurse-submodules` 已过期，core 以 `org.valkyrienskies.core:impl:1.1.0+<hash>`
+的形式从 `maven.valkyrienskies.org` 发布二进制，没有 sources jar）。内核相关的结论来自
+vineflower 反编译 `PhysShipImpl` 和 `GameToPhysicsAdapter`。
+
+关键引用：
+
+| 位置 | 内容 |
+| --- | --- |
+| `common/.../assembly/ShipAssembler.kt:139` | `toShip.isStatic = fromShip == null \|\| fromShip.isStatic` —— 全新装配的船先被标成静态 |
+| `common/.../assembly/ShipAssembler.kt:172` | `toShip.isStatic = false` —— 几行之后才设回动态 |
+| `common/.../assembly/ShipAssembler.kt:376` | `assembleToShip(level, blocks, scale)` 就是官方 `ShipAssemblerItem` 用的入口，我们没走歪 |
+| `common/.../util/GameToPhysicsAdapter.kt:42` | 力在 `physTickEvent` 里按维度分桶排空（`applyWorldForce` 等） |
+| `common/.../ValkyrienSkiesMod.kt:148` | `physTickEvent` 只驱动 GTPA、方块实体监听器、实体监听器三类，**不驱动 `ShipPhysicsListener`** |
+| 反编译 `core/impl/game/ships/PhysShipImpl` | 力先进 `invPosForces` 队列，由 `applyQueuedForces()` 逐帧排空；`canApplyWrenches()` 里 `return !isStatic` |
+
+`DimensionParametersResolver` 的 `maxYPos` / `seaLevel` 只影响大气密度（机翼升力），
+不参与"船是否被模拟"的判定 —— `/vs get-gravity` 在 `barotrauma:the_deep` 返回 10.0，
+说明我们那份 `vs_dimension_parameters/the_deep.json` 是**生效的**，格式也对。
+
+### 实测结论（都带数据）
+
+1. **装船本身成功**：130 格 → 质量 130000 kg，`/vs get-ship` 查得到 slug，
+   `physTick` 稳定 60 次/秒，力算出 (0, 1300000, 325000) N，`static=false`、`sleeping=false`。
+2. **但刚体是死的**：速度永远 0.000，位置一格不动，**连重力都不拉它**；`/vs teleport`
+   能搬走，200 ms 内又瞬移回原位。力和重力双双无效 = 这个刚体没进求解器。
+3. **`vs dock` 只铺回 1 格**（"已拆回世界：铺回 1 格"），129 格蒸发 —— 恢复命令是坏的。
+4. **服务端重启 = 装着的船丢失**：方块已被搬出世界，重启后 VS 船没回来。
+5. **反复 `vs launch` 会叠船**：`/vs delete @v` 一次删掉 **4 艘**，互相碰撞顶死。
+   第一次"船不动"的现场其实是这个，不是物理没生效。
+6. **确实见过一次真正的物理**：17:19 玩家从深海维度传回主世界后，同一艘船开始受重力
+   （速度 -0.33 → -0.54，y 持续下降）。VS2 物理本身能跑，只是"什么样的船才算活着"没钉死。
+
+### 这轮顺手修掉的我们自己的 bug
+
+- `VsPilot` 僵尸句柄：`/vs delete` 之后旧 `ServerShip` 句柄不会变 null，位置/速度/质量
+  还读得出最后一帧的值，`vs status` 看起来正常而船已不存在。现在用之前回船世界
+  `getAllShips().getById()` 确认，查不到就丢掉（`stillExists` / `dropStale`）。
+- `vs launch` 支持 `vs launch <x> <y> <z>`，不带玩家也能从控制台装船，方便无人调试。
+- 装配后连续 20 tick 主动 `setStatic(false)`（`unstaticTicks`）—— **实测无效**，
+  先留着，等根因确定再决定删不删。
+
+### 下一步（按优先级）
+
+1. 用 `VsiServerShipWorld.retrieveLoadedPhysicsEntities()` 确认运行时装配的船到底有没有
+   `PhysicsEntityServer` —— 这是"刚体在不在求解器里"的直接证据。
+2. 已经试过**无效**的：`applyInvariantForce` 直压队列、`GameToPhysicsAdapter.applyWorldForce`、
+   装配后 `setStatic(false)`、`/vs remass`、让玩家离开再回来（4 秒）。
+3. 若确认 VS2 在"区块已加载时装配"这条路径上就是不出物理体，现实选择只有两个：
+   装完船后强制卸载再加载船区块（需要 core 内部 API），或改用自己写的刚体方案。
+
+## 10.34 声纳合并船核心 + 清理死方块 + 物理再调查（2026-11-01 晚）
+
+### 声纳台就是船核心
+
+`SonarBlockEntity extends ShipCoreBlockEntity`。因为 63 处判断写的是
+`instanceof ShipCoreBlockEntity`，而声纳是它的子类，**那些逻辑一行没改就全接上了**
+（`ShipCores.resolve/nearestCore`、`VsPilot.launch`、`ShipActionPacket`、
+`SonarPingPacket`、`ShipMover`、`StarterSub`……）。
+
+改动点：
+- `ShipCoreBlockEntity` 加了一个 `protected ShipCoreBlockEntity(BlockEntityType<?>, pos, state)`
+  构造给子类用（`BlockEntity` 的类型必须在构造时给定，而声纳的类型不是 SHIP_CORE）。
+- `SonarBlock.getTicker` 服务端也返回 `ShipCoreBlockEntity::serverTick`。
+- `StarterSub.corePos()` 改成指向声纳台的位置；造初始潜艇时不再放船核心方块。
+
+**踩到的坑**：`ShipGeometry.collectHull` 选的是"离核心最近的连通块"。声纳既是核心又是
+`isShipBlock`，它和外面那层船壳之间隔着一格空气、**不连通**，于是选中的是距离 0 的
+声纳自己 —— 装船只收到 1 格、质量 300。修法是在收集时 `if (pos.equals(core)) continue;`。
+排除核心之后选中的才是真正的船壳。
+
+### 删掉的东西
+
+| 删除 | 原因 |
+| --- | --- |
+| `ship_core` 方块 | 已合并进声纳 |
+| `helm` 驾驶台 | 从没实现过任何逻辑，掌舵本来就在声纳里 |
+| `ship_console` 菜单 + `ShipConsoleMenu`/`ShipConsoleScreen` | 早期"独立船控制台界面"的遗留，没有任何方块能打开它，纯死代码 |
+
+`oxygen_tank`（右键补氧）和 `diving_knife`（铁剑档位）**保留**——它们有实现，只是还没接进玩法。
+
+### 声纳界面翻页
+
+顶部两个页签，第 1 页声纳、第 2 页核心。核心页内容由服务端拼成多行文本
+（`ship.summary()` + `ship.liveReport()`）随 `SonarDataPacket` 一起下发，客户端只负责
+换行和裁剪，避免为这一页再开一堆数值字段的协议。
+
+注意：页面版式是 500×276，**GUI 缩放为 2 时 856 宽的窗口装不下**，页签会被挤到边界外。
+这不是 bug，全屏或调小 GUI 缩放即可。
+
+### vs_mass 数据包
+
+VS2 wiki（`Valkyrien-Skies-2.wiki`，只有一页）写明方块质量来自数据包 `vs_mass`。
+我们之前**一条都没有**，所有自定义方块都吃 `defaultBlockMass`（1000）。现在按真实密度
+补了 `data/barotrauma/vs_mass/ship_blocks.json`：钢壳 7850、强化玻璃 2600、反应堆 6000
+等，装船质量的量级终于对了（131 格 ≈ 1020 吨）。
+
+### 物理：间歇性工作，未稳定
+
+**见过一次真的物理**（19:26，同一份代码）：
+
+```
+19:26:13  中心(0.5, 193.7, 0.5)  速度 -8.83
+19:26:14  中心(0.5, 174.3, 0.5)  速度 -16.43
+19:26:16  中心(0.5, 150.0, 0.4)  速度 -22.48   live=同一个
+```
+
+船在自由落体，而且**加速度约 5 m/s² 而不是纯重力的 10**，说明我们施加的 10.2 MN
+上浮推力**确实作用到刚体上了**，只是没完全抵消重力。物理链路是通的。
+
+但之后三次同样流程的装配（19:28 / 19:31 / 19:37）船都纹丝不动，**无法稳定复现**。
+
+新证据与排除项：
+- `live=同一个`：`physTick` 回调拿到的 `PhysShip` 和 `level.getShipById(id)` 是同一个对象，
+  排除"力施加在快照上"。
+- `teleportShip` 能把船搬动（曾因参数 `posInShip` 传错把船传到了
+  `(28653628, 60, -12289987)`，已回滚），说明物理引擎本身能正常积分。
+- 删世界重建、换位置、不调 `/vs delete` 都复现了"不动"。
+
+结论倾向：**dev 环境（ForgeGradle runServer）下 VS2 的物理体创建时有时无**，
+与我们的代码无关。下一步要打包成正式 jar 丢进 PCL2 实例验证。
+
+## 10.35 两套移动系统 / 切换进水 / 方块没删 / 姿态（2026-11-01 夜，用户实测反馈）
+
+用户实测原话：**"声纳有两种移动系统，一种方块一种物理叠加到一起；切换状态依旧会进水；
+那些方块也没删；潜艇要永远平行于海平面，不然会翻。"**
+
+四个症状不是四个 bug，是**两个**根因：
+
+### 根因 1：方块进了刚体之后**还在 tick**，方块级模拟没停
+
+这是最关键的一条认知修正。之前一直以为"装配完方块就不在世界里了"，**错的**：
+VS2 的 `assembleToShipFull`（`ShipAssembler.kt:250-284`）把方块从原坐标搬走，
+但搬到的是**船坞区块**（`chunkClaim` 中心），方块数据仍然在世界的区块里、
+**方块实体也照旧 tick**。于是装配完之后：
+
+| 还在跑的东西 | 后果 |
+| --- | --- |
+| `ShipCoreBlockEntity.serverTick` → `state.tickMovement` | `ShipMover` 在船坞坐标里搬同一艘船的方块，VS2 又在按 transform 搬整艘船 → **两套移动系统叠加** |
+| 同一条里的 `applyWater` | 把水写进船坞里的"船舱"，看起来就是**一直进水** |
+| `hullIntact` + 每 40 tick 重扫 | 船坞坐标下永远判定失败 → 无限重扫 → 舱室被判"连海" → 灌满 |
+
+之前的"修法"是在 `serverTick` 里加了一个**全局**开关
+`VsSupport.available() && VsPilot.hasShip()`——那是"世界上有没有物理船"，
+不是"这台声纳所在的船是不是物理船"，所以既拦不住自己人、还会误伤别的船。
+
+**修法：按船判定 + 显式停手。**
+
+- 新增 `ship/vs/VsState.java`：**不引用任何 VS2 类型**的中转站。
+  存 `active` 标志、`activeState`（物理船那份 `ShipState`）、
+  以及两个回调接口 `Probe`（这个方块位置属于物理船吗）和 `Control`（把船状态推给推进器）。
+  为什么单独一个类：判断点分布在 `ShipCoreBlockEntity` / `ShipActionPacket` /
+  `StarterSub` 里，这些地方**没装 VS2 也得能加载**，直接引用 `VsPilot`
+  会因为 `ServerShip` 不在而 `NoClassDefFoundError`。
+- `VsBridge.managingShip(level, pos)` 用 VS2 自己的
+  `VSGameUtilsKt.getShipManagingPos(level, blockPos)` 问"这个方块归哪艘船"，
+  `VsPilot` 拿它和当前船 id 比 → **per-ship** 判定。
+- `ShipCoreBlockEntity.serverTick` 一进来就问 `VsState.isPhysical(level, pos)`，
+  是就 `return`——推进、水位、破口重扫**全部**停手。
+- `ShipCoreBlockEntity.rescan` 同样代理：物理船的声纳方块实体是个**新**的
+  （旧的随装配被搬走），它自己的 `state` 是 null，按船坞坐标扫出来全是垃圾；
+  现在直接返回 `VsState.activeState()`（同一个对象），面板和操舵就都对得上。
+
+### 根因 2：`StarterSub.ensure` 在物理船存在时**又造了一艘**
+
+`sendToOutpost`（`/barotrauma deep`、首次登录、重生）都会调 `StarterSub.ensure`。
+装配之后声纳方块被搬进船坞，`corePos()` 那一格变成空气 → `ensure` 认为"还没造过"
+→ **在原地把整艘方块潜艇重新造一遍**。这才是用户看到的"方块没删 / 两个东西叠在一起"
+的字面来源：物理船在海里，原地又站着一艘一模一样的方块潜艇。
+
+**修法**：`ensure` 开头两重保护——`VsState.active()` 直接跳过；
+声纳没了但船体方块还在（`hasRemainingHull`）也跳过，避免"半条船"被重建。
+
+### 顺带修掉的：`vs dock` 会吞掉全部方块
+
+`ShipAssembler.deleteShip(level, ship, deleteBlocks, dropBlocks)` 的第三个参数
+**不是"铺回方块"**：`false` = 世界一格不动只删船对象，`true` = 把船的世界包围盒
+**挖成空气**（`/vs delete <ship> true` 那个）。VS2 里根本没有"刚体还原成方块"的 API。
+我们之前写的 `deleteShip(..., false, false)` 注释说"这才是铺回方块"——错的，
+所以"已拆回世界：铺回 1 格"，其余全蒸发。
+
+**修法**：装配前留一份方块快照 `Map<BlockPos, BlockState>`；
+拆船时先 `discard`（只删刚体），再按 `快照位置 + 船自装配以来的整数位移` 铺回世界，
+最后对新声纳台 `rescan`。因为姿态锁死在水平（见下），这里不需要做旋转变换。
+
+### 姿态：永远平行于海平面
+
+推力全部作用在质心上（`applyInvariantForce`），本身不产生力矩，倾斜只可能来自碰撞。
+`VsThruster` 加了两条，都在物理回调里按质量缩放（转动惯量随质量增长，
+不缩放的话大船纹丝不动、小船被甩飞）：
+
+1. **角速度阻尼**：力矩 = `−ω × 900 × mass`，把"转起来"掐死在源头；
+2. **回正力矩**：船的上方向 `up` 在世界的朝向和 `+Y` 有夹角时，
+   绕 `up × (+Y)` 施加 `倾角 × 700 × mass` 的力矩把它拉回来。
+   完全翻过来（夹角 π）时转轴退化，退回到绕 +X 轴推。
+
+力矩封顶 `4000 × mass`。`vs status` 现在会打印 `姿态 倾角 x.x° 偏航 y.y°`，
+理想的物理船永远是 `倾角 0.0°`。
+
+### 控制路径也并成一条
+
+之前"两套"在操作上也是真的：声纳面板的油门只写 `ShipState`，
+物理推进器只能靠 `/barotrauma ship vs thrust` 控制，两边互不相通。
+
+现在：面板 → `ShipActionPacket` → `ShipState` → `VsState.syncControl(state)`
+→（物理时）`VsThruster.setThrottle/setPower/setBallast`。
+`VsPilot.tick()` 每 tick 再同步一次（压载、进水比例会变），
+并且把刚体的真实速度 `sync` 回 `ShipPhysics`，
+所以面板上的航速、下潜速度是刚体的真数，不是方块模型的假数。
+
+`SonarPingPacket` 在物理模式下扫描中心改用**玩家坐标**：
+物理船的声纳方块位置是船坞坐标，拿它扫世界只会扫到船坞。
+核心页也会多一行 `驱动：VS2 物理刚体` / `驱动：方块推进`，一眼看出哪套在跑。
+
+### VS2 源码查证补充（这轮）
+
+| 位置 | 内容 |
+| --- | --- |
+| `ShipAssembler.kt:250-284` | `removeOriginal=true` 时把源方块先设 `BARRIER` 再 `removeBlock`，方块搬到船坞 |
+| `ShipAssembler.kt:715-733` | `deleteShip` 的 `deleteBlocks` 是"挖掉世界方块"，不是"铺回" |
+| `ShipAssembler.kt:138-172` | 装配时先 `isStatic = true`，几行后设回 `false`；新船旋转是 `Quaterniond()`（单位四元数）→ **装配出来天生是水平的**，这对姿态锁定是个好消息 |
+| `VSGameUtils.kt:376-388` | `ServerLevel?.getLoadedShipManagingPos(chunkX, chunkZ)` / `(blockPos)` / `(pos)` |
+| `VSGameUtils.kt:447-459` | `ServerLevel?.getShipManagingPos(blockPos) : Ship?` —— 方块归属查询用它 |
+
+### 顺带查清的：`retrieveLoadedPhysicsEntities()` 那个探针是错的
+
+之前一直拿 `VsiServerShipWorld.retrieveLoadedPhysicsEntities()` 判断"刚体进没进求解器"，
+返回 0 就被当成"船没进物理世界"。**这个结论是错的**：那个方法返回的是
+`VSPhysicsEntity`（用物理实体生成器物品手动造出来的刚体球），**和船的刚体没有关系**。
+`VSPhysicsEntity.kt:176` 是唯一调用 `createPhysicsEntity` 的地方。船 100% 在物理世界里，
+physTick 每秒 60 次就是证据。
+
+### 又排除掉的三个：力还是进不去
+
+这轮把力度诊断补全（`力=(x,y,z)`），三个实验都做了，**船还是速度恒 0**：
+
+| 实验 | 结果 |
+| --- | --- |
+| 力 API 从 `applyInvariantForce(f)` 换成 `applyWorldForce(f, 质心世界坐标)` | 力算出来了 `力=(0, 4.08e6, 1.02e6)`，**速度仍 0** |
+| 装配后 20 tick 内 `setStatic(true)` → `setStatic(false)` 翻转（逼 VS2 重建刚体类型） | **无效**，`static=false sleeping=false` 但不动 |
+| 复核 `physTick` 里读到的 `PhysShip.getTransform()` | 位置 11 秒纹丝不动，说明是**求解器根本没积分这具刚体**，不是我们读错了 |
+
+为什么换 API 仍然值得做：反编译 `PhysShipImpl` 看得很清楚，
+`applyInvariantForce(f)` → `applyWorldForceToBodyPos(f, null)` →
+`invPosPositions.add(null)`，最后 `applyQueuedForces()` 里执行
+`rigidBodyReference.a(null, force)`——**位置参数是 null**。
+`applyWorldForce` 会先把世界坐标变换到模型坐标再减质心，得到真实的体坐标点，
+走同一条队列但没有 null。这条不管冻不冻结都是更正确的写法。
+
+`vs-core-server.toml` 里相关的几个值（都是默认值，看起来不像"专门冻结"）：
+
+```
+shipLoadDistance = 128.0   shipUnloadDistance = 196.0   shipLoadFreezeSeconds = 5.0
+physicsBackend = "KRUNCH_CLASSIC"   physicsTicksPerGameTick = 3
+synchronizePhysics = false          enableConnectivity = false
+```
+
+**下一步**：按 §10.33 的原计划，打包成正式 jar 丢进 PCL2 实例、**带玩家**跑一次。
+19:26 那次真物理是有玩家在线、且当时还在主世界；无玩家的自检服务器里
+`loadedShips=1` 但刚体从不积分，很可能是"没有玩家 → 船区块的加载票据不完整 → 
+VS2 把船挂在冻结状态"这条路径。
+
+## 10.36 物理船真的能动了——只剩"初始潜艇那个位置装配失败"（2026-11-01 深夜）
+
+用户要求：**"以后每次开工先上网搜"**。这条已经写进 `AGENTS.md` 第 0 条铁律。
+下面先写查到的资料，再写实测。
+
+### 查到的资料（Barotrauma wiki，Fandom 镜像）
+
+| 页面 | 内容 |
+| --- | --- |
+| `Pumps` | 大泵 `powerconsumption = 300`、`maxflow = 600`；小泵 `powerconsumption = 60`、`maxflow = 100` |
+| `Pumps > Ballast` | 压载泵 = 把所在房间维持在某水位，**从而控制浮力、决定垂直加速度**；做法是把泵的 `set_targetlevel` 接到**导航终端的 `velocity_y_out`**（−100..100 = 目标水位 0..100%） |
+| `Pumps > Bilge` | 舱底泵由**水探测器**触发（给 `set_state`），满速抽到房间干为止 |
+| `Pumps > Connection Panel` | 输入：`power_in` / `toggle_state` / `set_state` / `set_speed`(−100..100) / `set_targetlevel` |
+
+**查不到的（必须标成假设）**：
+
+- `Ballast` 页面**不存在**（API 返回空字符串）。
+- `Submarine` 页里的 `==Ballast==` 是**空段落**，没有任何内容。
+- 所以"潜艇用什么姿态配平、倾斜多少算正常"**没有官方数据**。
+
+**按假设处理**：用户要求"永远平行于海平面"，那就按"姿态锁死到 0°"实现（不是原版行为，
+是用户指定行为）；压载只影响垂直加速度，不影响姿态。等以后有官方数据再回来对。
+
+**还欠的一处机制对齐**：原版是"垂直速度 → 目标水位"的闭环（`velocity_y_out` → `set_targetlevel`），
+我们现在是直接给推力。数值上等价、机制上不同，记在这里待办。
+
+### 实测：物理是好的
+
+用户开了 dev 客户端，我直接在里面用命令做对照实验（数据全部来自
+`run-client/logs/latest.log` 的 `[CHAT]` 行，不是推理）。
+
+| 场景 | 装配结果 | 能不能动 |
+| --- | --- | --- |
+| 主世界 (100,66,100) 空中 5×5×5 | ✅ 99 格 **质量 769600** 位置正确 | ✅ 0 → 4.30 → 11.53 格/秒 |
+| 主世界 (500,150,500) 空中 5×5×5 | ✅ 99 格 769600 位置正确 | ✅ **0 → 7.44 → 14.70 格/秒**，位移 +44，倾角 0.0°→10.0° |
+| 深海维度 (2000,−150,2000) 空中 | ✅ 99 格 769600 位置正确 | 未加推力 |
+| 深海维度 (3000,−100,3000) **水下** | ✅ 99 格 769600 位置正确，`liquid=0.908` | 沉浮 1.05 格/秒 |
+| **深海维度 初始潜艇位置** | ❌ **质量 300（只剩声纳一块）**，中心跳到 **(0,300,0)** | 不可能动 |
+
+`质量 769600 = 98 × 7850（装甲板）+ 1 × 300（声纳）`，说明 **`vs_mass` 数据包生效、
+方块全部进了刚体**。所以 `applyWorldForce` 那套、姿态锁、`VsState` 停手逻辑都是对的。
+
+**关键结论**：`质量 300` 正好等于 `vs_mass` 里声纳那一条 —— 那个位置的装配**只把声纳一块
+收进了刚体**，其余 408 格被删掉但没进船。用户说的"船和声纳不是一体"和"还是进水"
+就是这一件事：船壳消失了、原地变回海水，声纳孤零零留在原地。
+
+### 已经排除的因素
+
+- ❌ 不是维度问题（深海维度 (2000) 和 (3000) 都成功）
+- ❌ 不是水下问题（(3000) 那个就是泡在水里装配的）
+- ❌ 不是"无玩家"（这次有玩家）
+- ❌ 不是 `vs_mass` 缺失（769600 对得上）
+- ❌ 不是 `applyInvariantForce` 的 null 位置（已换成 `applyWorldForce`）
+
+### 还没排除（下一步按这个顺序试）
+
+1. **尺寸 / 跨区块**：成功的三例都是 5×5×5（单区块 x/z 各 1 个），失败的是 9×5×15
+   （x 跨 chunk −1 和 0，z 跨 16..30 也在两个 chunk）。**下一发就在 (2000) 造一个 9×5×15**
+   —— 成功则说明是位置，失败则锁定"多区块船装配坏"。
+2. **初始潜艇那个位置本身**：chunk (0,0) 附近有哨站、有海、有大量生成的岩石。
+
+### 结论：是**位置**，不是尺寸（已测）
+
+最后一发：在深海维度 (2000,−150,2000) 用 `barotrauma:test_hull` 造一艘
+**和初始潜艇一模一样的 9×5×15**（x 跨 2 个 chunk、z 跨 2 个 chunk），装配结果：
+
+```
+已收成物理船：403 格，质量 804300，中心 (2000.5, -149.5, 2001.5)
+物理船｜质量 804300｜中心 (2000.5, -149.5, 2001.5)｜动态｜姿态 倾角 0.0°
+```
+
+`402 × 2000（test_hull）+ 1 × 300（声纳）= 804300` **一分不差**，位置也对。
+
+**所以跨区块、尺寸、水下、维度、vs_mass 全部排除。**
+失败只发生在初始潜艇那一片（约 chunk 0,0 附近）。
+
+**目前最可能的解释**：VS2 给第一艘船分配的**船坞 chunk claim 就在 chunk (0,0) 一带**，
+而那正好是我们的**前哨站**所在——船坞区块被已经生成的哨站结构占着，
+`moveBlocksFromTo` 往那里铺方块时铺不进去，于是只有声纳那一格（最近/最先）进去了，
+船位置退回 claim 中心 (0,300,0)（这个 y 还超出了深海维度 maxY=15）。
+
+**下一步（下次开工第一件事）**：在 (0,−150,0)、(16,−150,0)、(32,−150,0) 各装配一次小船，
+把"失败半径"量出来；如果确认是 chunk (0,0)，就把哨站/初始潜艇整体挪开，
+或者干脆在装配前先检查目标位置附近有没有我们的方块并给出明确报错。
+
+### 新加的东西：透明试验船壳
+
+用户建议"把潜艇外壳换成透明方块类似玻璃那样比较好测试"。新增：
+
+| 项 | 内容 |
+| --- | --- |
+| 方块 | `barotrauma:test_hull`「试验船壳（透明）」 |
+| 模型/贴图 | `block/cube_all` + `minecraft:block/glass`，客户端 `RenderType.translucent()` |
+| 属性 | `noOcclusion` + `isViewBlocking=false` + `isSuffocating=false`，真的能看穿 |
+| 算不算船体 | `isShipBlock` 认它，`vs_mass` 给 2000 |
+| 用在哪 | **`StarterSub` 的船壳直接用它造**，出生那艘船现在整个是透明的 |
+
+已截图确认：站在船里能直接看穿船壁看到外面的水，机器（声纳台、引擎）都清清楚楚。
 
 
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+## 10.37 测试体系：按 minecraft-testing 技能搭三层（2026-11-01 深夜）
+
+用户要求"用 mctesting 看看物理船怎么搞"。加载 `minecraft-testing` 技能后，它的路由判断是：
+**纯逻辑用 JUnit、游戏内交互用 GameTest、全流程用集成服务器**，不要再靠"改代码 → 开服 →
+人肉看日志"这一条路。
+
+对号入座：
+
+| 层 | 工具 | 覆盖 | 状态 |
+| --- | --- | --- | --- |
+| L1 纯逻辑 | JUnit Jupiter | `ShipPhysics` / `ShipGeometry` | ✅ 17 个用例，`gradlew test` 20 秒内跑完 |
+| L2 游戏内 | Forge GameTest | 物理船装配 / 质量 / 拆回 | ✅ 3 个用例，`gradlew runGameTestServer` |
+| L3 集成 | 现有 `runServer` + `.smoketest` | 世界生成、声纳、反应堆、水泵 | 已有，缺断言（待办） |
+
+### L1：JUnit（`src/test/java`）
+
+`build.gradle` 里补：
+
+```groovy
+testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+tasks.named('test', Test).configure { useJUnitPlatform() }
+```
+
+**踩坑**：第一次跑必须**联网**（`--offline` 时 JUnit 不在缓存里，会报
+`No cached version of org.junit.jupiter:junit-jupiter:5.10.2`）。拉一次之后就能离线跑了。
+
+两个测试类的期望值**全部来自已有日志**，不是编的：
+
+- `ShipPhysicsTest`（11 个）：`满推力 2s 速度=5.35`、`松油门再 2s=0.58`、
+  `压载满 3s 垂速=-0.71` —— 就是自检里 `[smoketest] physics -> ...` 那一行。
+- `ShipGeometryTest`（6 个）：5×5×5 空心壳 = 98 格 / 1 舱室 / 27 容积 / 密闭；
+  挖一格变连海；**核心自己不算船体**（这是"装船只收到 1 格"那个 bug 的回归测试）。
+
+`BlockPos` 这种 MC 基础类在测试 classpath 上是可用的，不需要 `Bootstrap` 引导。
+
+### L2：Forge GameTest
+
+`src/main/java/.../gametest/PhysicsShipGameTests.java`，3 个用例：
+
+1. `scan_collectsWholeHullNotJustCore` —— 声纳**悬在舱中、不和船壳相连**，
+   断言 `hullBlocks == 98`、`collectBlocks == 99`。守住"又选中核心自己"。
+2. `launch_putsEveryBlockIntoRigidBody` —— 断言刚体质量 `= 98×2000 + 300 = 196300`。
+   这是"船和声纳不是一体 / 水灌进来"的直接指标。
+3. `dock_restoresBlocksToWorld` —— 断言拆完之后船壳 98 格 + 声纳 1 台都回到世界里。
+
+**三个坑（都踩过）**：
+
+| 坑 | 现象 | 修法 |
+| --- | --- | --- |
+| 模板路径 | `Could not find structure file gameteststructures\empty_16x8x16.snbt` | 反编译 `StructureUtils.getStructureTemplate` 后确认：它先走 `StructureTemplateManager.get()`（读 `data/<ns>/structures/*.nbt`），失败后回落到**文件系统** `Paths.get(testStructuresDir, "gameteststructures/<path>.snbt")`。实测只有 **`run/gameteststructures/*.snbt`** 生效（相对 run 工作目录），放 mod 资源里没用 |
+| `VsPilot` 单例 | 三个用例同一个 batch 并行跑，互相抢船，dock 用例挂 | `@GameTest(..., batch = "physics_xxx")` 各给一个 batch，串行执行 |
+| 位置精确断言 | 断言声纳"回到原坐标"失败，但 dock 报告"铺回 99 格" | 改成**数整个船体区域的方块数**（98 船壳 + 1 声纳）。VS2 会自己算质心/位移，逐格坐标断言太脆 |
+
+模板生成器：`tools/gen_gametest_structure.py` —— 输出全空气的 `.snbt` 到 `run/gameteststructures/`。
+**`run/` 会被重建，删了 world 之后记得重跑一次。**
+
+### 这套测试抓不到什么
+
+GameTest 跑在平的测试世界里，**复现不了"初始潜艇那个坐标装配失败"**——
+那是位置/维度相关的，只能靠真实世界扫坐标（见 §10.36 的"下次开工第一件事"）。
+
+所以层与层是互补的：L1/L2 守回归，L3 + 真实世界扫坐标找环境相关的 bug。
+
+### 常用命令
+
+```powershell
+.\gradlew.bat test --offline                 # L1，约 20 秒
+.\gradlew.bat runGameTestServer --offline    # L2，约 25 秒
+python tools\gen_gametest_structure.py       # 重建 GameTest 模板（删过 run/ 之后）
+```
+---
+
+## 10.38 进水的真凶：装配结果从来没被校验（2026-11-01 23:30 前后）
+
+上一节结尾把"装配失败"归因成**位置**（"只有初始潜艇那个坐标会失败"）。**这个结论是错的。**
+
+### 推翻旧结论的证据
+
+把三处日志（`run/logs`、`run-client/logs`，含 `.gz` 解压）全量检索"已收成物理船"，
+同一个位置既有成功也有失败：
+
+```
+20:47:28  已收成物理船：409 格，质量 3117600，中心 (0.5, -149.5, 23.5)   ← 成功
+21:03:46  已收成物理船：409 格，质量 300，中心 (1.5, -150.5, 20.5)      ← 失败
+18:33:18  已收成物理船：1 格，  质量 300，中心 (0.5, 201.5, 0.5)        ← 失败（只 1 格）
+```
+
+方块数一样（409）、位置一样。所以 **位置不是变量，是间歇性失败**。
+"扫失败半径"那条路是白走的，已从 STATUS 里删掉。
+
+### 代码层面的真 bug
+
+`VsPilot.launch()` 只判 `assembleToShip()` 返回 null，不校验刚体里到底进了多少方块，
+就把状态清空并回报"已收成物理船：N 格，质量 X"。而 VS2 的装配顺序是
+**先挖空世界方块，再铺到船坞区块**（见 `_vs2src/.../ShipAssembler.kt:250-320`），
+铺失败时世界已经空了：
+
+- `质量 300` = 只有声纳那一格进了刚体 → 用户："船和声纳不是一体的"
+- 船壳被删掉、海里那块原地变回海水 → 用户："还是进水"
+
+**两个抱怨是同一个根因。** 之前 §10.35 修的 `VsState.isPhysical`（方块那一套停手）
+解决的是"两套移动系统叠加"，和这个是两件事。
+
+另外 VS2 自己的日志里有旁证：装配后会等 20 tick 让船坞区块开始 tick，超时就
+`Timed out waiting for chunks to start ticking after assembly! Forcibly resuming...`
+然后**强行继续**——这时候装配很可能只成功了一部分。日志里这个警告反复出现
+（15:05 / 15:17 / 19:28 / 20:30 / 20:34 / 20:37）。
+
+### 修法
+
+1. **质量对账**：装配前用 `BlockStateInfo` 把快照里每个方块的质量加起来当 `expected`
+   （新方法 `VsBridge.blockMass`），装配后比 `VsBridge.mass(ship) / expected`。
+   低于 `0.85` 判失败（留 15% 容差，因为 VS2 的质量走它自己的体素/连通性数据）。
+2. **失败回滚 + 重试**：最多 3 次。每次失败先 `VsBridge.discard` 删掉半成品刚体，
+   再按快照把方块铺回原位，然后重试。全部失败就铺回并明确报错——
+   **不再出现"船壳没了、原地变海水"**。
+3. **方块集改用 `collectBlocks`**：`geometry.hull()` 是"最大连通分量"，
+   声纳台挂在船壳外面时不属于它，用 `hull()` 装船必然把声纳留在原地。
+4. `launch` / `dock` 里手写的铺回循环抽成 `restoreBlocks(level, snapshot, dx, dy, dz)`。
+
+### 关于"进水"的二次假设（**未证实**）
+
+smoketest 量到装配后 `舱室格 267（水=267）｜船体格 408（水=408）`。
+若成立，机制是：VS2 把方块挖走后海里出现空腔，海水立刻灌满；而船是渲染在船坞区块上、
+正好渲染在这个空腔位置——**透过透明船壳看就是"船里全是水"**。
+
+**但这批数据是污染的**：同一个 smoketest 在这之前跑过「开门 / 破口」场景，
+那些场景会把舱室重新分舱成"连海"，`ShipWater.apply` 本来就会写满 267 格水。
+所以不能把 267 算到装配头上。
+
+为此写了 `HullPlug`（`barotrauma:hull_plug`：不可见 / 不碰撞 / 挡水，装配后填满船的
+包围盒，按整格差集跟船移动，拆船前撤掉）和 `/barotrauma ship vs flood` 诊断命令，
+**但方案前提没证实**。下次开工必须先用隔离场景验，见 STATUS.md。
+
+### 这一轮验证状态
+
+```
+gradlew build --offline              ✅ jar 231 KB
+gradlew test --offline               ✅ 17 用例 / 0 失败
+gradlew runGameTestServer --offline  ✅ All 3 required tests passed :)
+```
+
+装配对账/回滚没跑过真实装配；`HullPlug` 完全没验证。
+
+### 附带发现
+
+- VS2 的船**不在别的维度**：`ShipAssembler.moveBlocksFromTo` 把方块铺在
+  **同一维度的预留远处区块**（船坞），坐标是 `ship.chunkClaim`。
+  实测那一批船坞在 `chunk[-1791872..-1791871, 768127..768128]`。
+  所以 `valkyrienskies:shipyard` 那个维度在这条路径上没参与。
+- `run/world` 被删重建：上一轮 smoketest 把初始潜艇装配走、没拆回来就存盘，
+  世界文件里那块就是个灌满水的坑。**自检会改存档，跑之前先想清楚要不要备份。**
+
+## 10.39 ZCode 侧 MC 开发技能调研与安装（2026-11-02）
+
+> 用户要求："去 GitHub 上找找 mc 模组开发插件"。ZCode 桌面环境里此前没有任何
+> Minecraft 技能（DSH 的方案 C 只覆盖 DSH 宿主）。
+
+### 候选与结论
+
+| 候选 | 结论 |
+| --- | --- |
+| **Jahrome907/minecraft-agent-skills**（196★，2026-10-30 仍在更新） | ✅ **选它**。13 个技能，v2.5.4 起自带标准 `.claude-plugin` 插件目录；`minecraft-modding` 明确覆盖 **Forge 1.20.1 + Java 17 + ForgeGradle 6**（我们的版本）；testing（JUnit/GameTests）、world-generation、resource-pack、datapack 直接可用 |
+| chouzz/minecraft-mod-dev | ❌ 只面向 NeoForge/Fabric + 1.21+（"Migrate code to 1.21+"），无 1.20.1 |
+| vfyjxf/ModDevMCP | ❌ NeoForge 调试 MCP（本地 HTTP + skill-first），不支持 Forge 1.20.1；7★。思路（agent 直接操作运行中的游戏实例）值得以后参考 |
+
+- skillsdirectory 上那个 "Grade A" 的 minecraft-modding 技能，源头就是
+  Jahrome907/minecraft-agent-skills（gabrielmoreira/agent-skills-mirror 是它的镜像）。
+  即：DSH 方案 C 装的 13 个技能与本次装的是同一套上游。
+
+### 安装方式（ZCode 本地测试市场，plugin-creator 正路）
+
+- Jahrome907 仓库**不是**标准市场布局（根目录无 `.claude-plugin/marketplace.json`，
+  只有一个插件目录 `plugins/minecraft-codex-skills/`），不能直接
+  "添加 GitHub 市场"，所以走本地市场。
+- 插件源：`D:\ZCode work\default-workspace\plugins\minecraft-codex-skills\`
+  （13 个技能原样拷贝，SKILL.md 一律未改；`.claude-plugin/` 清单换成
+  `.zcode-plugin/plugin.json`，版本 2.5.4 保持）。
+- 本地市场：`D:\ZCode work\default-workspace\plugins\marketplace.json`，
+  市场 ID `dev-default-workspace-9f3d1272`，
+  插件全 ID `minecraft-codex-skills@dev-default-workspace-9f3d1272`。
+- 用户侧 UI 步骤：插件市场 → 添加 → 添加插件市场 → 粘贴
+  `D:\ZCode work\default-workspace\plugins` → 安装 minecraft-codex-skills → 重启宿主。
+- **使用约定沿用 AGENTS.md §4**：13 个技能里只有 `minecraft-modding` 真覆盖 1.20.1，
+  其余 12 个 description 写的是 26.x/1.21.x——点名时才加载，不为自动匹配改 description。
+- 评估时浅 clone 了三个仓库到会话目录 `_mc_plugins\`（仅作参考，不参与构建）。
+
+### 踩坑记录
+
+- GitHub API 未认证配额（60/h）按出口 IP 共享，18.166.98.56 这个代理出口经常
+  已被打满 → **抓 GitHub 一律走代理 + raw.githubusercontent.com / git clone**，
+  别依赖 api.github.com；WebFetch 直连 GitHub 会 ECONNRESET，也走代理。
+
+## 10.40 哨站改挂"最上方岩壁下方"（2026-11-02）
+
+> 用户反馈："把初始站点的生成规则改一下，放到最上方的岩壁或者岩柱下方，之前的都是洞"。
+
+### 为什么之前是"洞"
+
+- 哨站硬编码在 y∈[-160,-140]，而 `carveCavern` 在**同一位置**挖半径 34×26×34 的椭球
+  （中心 y=-150，y∈[-176,-124]）。椭球顶部 -124 把第一层顶板岩层直接挖穿，
+  哨站悬在椭球洞正中，四周是光滑洞壁 → 观感就是"生在洞里"。
+- 第一层顶板厚度由噪声决定：`roof = rock + hanging`，
+  `rock ∈ [0.12, 0.30]`、`hanging ∈ [0, 0.38]` → 顶板厚 14~82 格，底面在 y=-44~-112 之间波动，
+  想直接"贴上去"必须先把顶板底面压平。
+
+### 新布局
+
+| 项 | 旧 | 新 |
+| --- | --- | --- |
+| 哨站 y 范围 | -160..-140 | **-64..-44**（顶装甲与顶板底面重合） |
+| 出生点 | -158 | **-62** |
+| 水池椭球 | 中心 y=-150，顶 -124（挖穿顶板） | **中心 y=-72，顶 -46（不碰 -44 顶板）** |
+| 初始潜艇 | y -152..-148 | **y -72..-68** |
+| 门外平台 | y=-159 | y=-63（`OUTPOST_SPAWN_Y-1`） |
+
+- **压平**：`OutpostBuilder.inRoofFlattenZone(x,z)`（哨站范围外扩 1 格）内的列，
+  `rock = FLAT_ROOF_FRACTION = 0.12`（噪声最小值）、`hanging = 0`。
+  第一层顶板底面因此固定在 **y=-44**（frac(‑44)=14/120<0.12 是最后一块岩）。
+  压平区外噪声顶板只会更厚（底面更低），岩壁从平顶向四周自然下垂，不会留悬空边。
+- 哨站 `MAX_Y=-44` 用装甲替换最后一块顶板岩 → 气密直接靠装甲，无接缝。
+- 椭球中心下移后：哨站下半截（y<-46）泡在水腔里、上半截（y=-46..-44 装甲）贴着顶板；
+  气闸门外 (0,-62,13) 与初始潜艇 (z 16..30) 都核对过在椭球内。
+- `rising`（升柱）保留：第一层底板顶面在 y≈-135，离哨站 70 格外，不冲突。
+
+### 改动文件
+
+- `world/OutpostBuilder.java`：y 常量、压平判定/常量、椭球参数、门外平台、类注释
+- `world/DeepSeaChunkGenerator.java`：分层循环里按 `inRoofFlattenZone` 压平 rock/hanging
+- `world/ModDimensions.java`：`OUTPOST_Y=-54`、`OUTPOST_SPAWN_Y=-62`
+- `world/StarterSub.java`：`ORIGIN_Y=-72`
+- `event/DeepSeaEvents.java`：自检硬编码 `-142`/`-150` 改成常量；新增两条几何断言
+  （哨站是否贴岩壁 / 侧面是否有水）
+
+### 验证（2026-11-02 00:38，run/logs/latest.log 原文）
+
+```
+[smoketest] outpost floor=station_plating air=air
+[smoketest] outpost leaked water blocks = 0
+[smoketest] roof seal: armor(0,-44)=station_plating rock(0,-43)=stone     ← 顶上直接是岩
+[smoketest] pool: beside hull (22,-54)=water station ceiling (0,-45)=station_plating
+[smoketest] door=oak_door[...] outside=water shell=station_plating
+```
+
+- `gradlew build --offline` ✅；L1 17 用例 ✅；L2 `All 3 required tests passed` ✅。
+- `run/world` 已删重建（新生成规则），`.smoketest` 标记已删。
+- **观感尚未人工确认**：需要用户进游戏看"哨站是不是真的贴着岩壁"。
+  服务端只能验几何，验不了视觉。
+
+## 10.41 隔离自检结束：进水前提成立，排水体被 VS2 事后清掉（2026-11-02 01:19）
+
+> STATUS §"下次开工第一件事" 的隔离 smoketest 已实现并跑完。
+> 入口：`run/.smoketest-vs`（`VsFloodSmoke.java`），跑完自动关服。
+
+### 场景
+
+深潜维度找一片 9×9×9 全是水的干净位置 → 造 5×5×5 透明船（内部空气 + 中央声纳台）
+→ 扫描（1 舱室、27 格、密闭）→ 量一次 5×5×5 → 装配 → 40 tick 后量 → 拆回量。
+分两阶段：阶段 1 直接 `VsBridge.assemble`（不装排水体、不对账）；阶段 2 走正式
+`VsPilot.launch`（对账 + 排水体）。
+
+### 测量结果（run/logs/latest.log 原文，01:19）
+
+```
+阶段1 装配前：水=0 空气=26 排水体=0 别的=99
+阶段1 装配后立即：水=0 空气=125 排水体=0 别的=0
+阶段1 装配后 40 tick：水=125 空气=0 排水体=0 别的=0      ← 原始装配 100% 灌满
+阶段1 拆回后：水=26 空气=0 排水体=0 别的=99               ← 铺回后舱内仍积水（已修）
+阶段2 装配后立即：水=0 空气=0 排水体=125 别的=0
+阶段2 中途（20 tick）：水=0 空气=0 排水体=125 别的=0
+阶段2 装配后 40 tick：水=0 空气=0 排水体=125 别的=0       ← 修复后排水体守住
+阶段2 拆回后：水=0 空气=26 排水体=0 别的=99               ← 拆回的船是干的
+```
+
+**判定：排水体的前提成立（原始装配确实把 125 格全灌成水），HullPlug 保留。**
+
+### 顺带查明的两个真 bug（都已修）
+
+1. **VS2 装配协程会事后把排水体清掉**。
+   `assembleToShip` 返回后，VS2 的 "Sandwich Factory" 还在等船坞区块开始 tick；
+   无头/远处区块等不到（`Timed out waiting for chunks to start ticking after assembly!`），
+   超时"强行继续"时会再清一遍源区域——把 `HullPlug.install` 刚铺的排水体一起清掉。
+   修复前：装配后立即 plug=125，20 tick 后 plug=0、水=125（HullPlug 自己还以为在）。
+   → `HullPlug.ensure(level)` 每 tick 把船位内缺的格子补回（只在空气/水上铺，不覆盖玩家方块），
+     `VsPilot.tick()` 里跟在 `moveTo` 后面调用。修复后：中途/40 tick 都是 plug=125。
+2. **拆船后舱内积水**。`dock()` 铺回方块时，那片体积早被海水灌满，方块一铺就把水封在舱里
+   （阶段 1 拆回：舱内 26 格全是水）。→ `ShipState.clearWater(level, dx,dy,dz)` /
+   `ShipWater.clear(level, dx,dy,dz)` 支持位移，`dock()` 铺回后调用。修复后拆回：空气=26。
+
+### 验证状态
+
+- `gradlew build --offline` ✅（238 KB）
+- L1 17 用例 ✅、L2 3 GameTest ✅（01:20）
+- 隔离场景两阶段数据 ✅（上面）
+- 装配对账第一次跑真实装配：质量 196300/196300（100%）✅
+- **待用户进游戏看**：装船后船里是否还有水（几何与方块层面已经正确）
+
+### 仍然存在的风险
+
+- VS2 的船坞区块超时是无头环境的固有问题；真实客户端有玩家时是否也超时没验证。
+  但 `ensure` 是每 tick 兜底的，超时与否都能把排水体补回来。
+- 排水体每 tick 扫一遍船位（675 格级别的船 ≈ 675 次 getBlockState），开销可接受；
+  若以后船很大再改成"检测到丢失才全扫 + 差分"。
+
+## 10.42 只保留物理船 + 删机器/舱门 + 排水体改形状（2026-11-02 凌晨）
+
+> 用户实测反馈：水不进了；但物理船"完全没法开、一直往上浮、人在船上卡在玻璃里、
+> 声纳点不开、左键只有粒子"；"一直清空潜艇附近的水，太割裂"。
+> 用户拍板：**只保留开物理船的功能，方块船不再动了**（"动的时候一卡一卡的"）；
+> 删掉五台机器和舱门/舱口。
+
+### 根因（VS2 2.4.11 的能力边界，已从 jar 的混入清单确认）
+
+- `valkyrienskies-1.20.1-forge-2.4.11.jar` 里只有 `feature.block_placement`
+  （在船上**放**方块），没有 `ServerPlayerGameMode` / `useItemOn` 的坐标重映射：
+  **物理船上不能右键使用方块、也不能破坏方块**。方块在船坞区块、渲染在船位，
+  所以左键只有客户端粒子、右键声纳无效。
+- 解决方式不是改 VS2，而是给声纳加一个不走方块交互的入口：
+  `/barotrauma ship sonar`（打开与右键相同的界面；物理模式下 `SonarMenu.stillValid`
+  直接放行，因为声纳方块在船坞、距离判定永远失败）。
+
+### 删掉的东西
+
+| 删除 | 原因 |
+| --- | --- |
+| 五台机器：`nuclear_reactor` / `oxygen_generator` / `engine` / `ballast_tank` / `pump` | 除了被 ShipSimulation 计数外没有任何实现（无方块实体、无交互） |
+| `airlock_door`、`hatch`（ShipDoorBlock） | 用户点名删除；`ShipDoorBlock` 类一并删除 |
+| 方块形态移动：`ShipMover`、`ShipState.tickMovement/applyStep/slide`、`/barotrauma ship move`、自检的 move/drive 场景、舱门连通自检 | 用户："方块船不再动了，动起来一卡一卡的"；只留 VS2 物理船 |
+| 相关注册/物品/创造栏/语言/blockstate/model/texture/vs_mass 条目 | 随方块删除 |
+
+- 自检船与初始潜艇现在只有船壳 + 声纳台。
+
+### 排水体改造（解决"清空潜艇附近的水"）
+
+- `HullPlug.install(level, Collection<BlockPos> cells)`：从"包围盒"改成
+  "船体方块 + 密闭舱室"精确形状。船轮廓外的海水不动。
+- `moveTo` / `remove`：腾出来的格子**回填海水**而不是空气——不再拖干燥尾迹，
+  服务器重启后也不会留下看不见的方块壳。
+- `ensure` 保留：每 tick 补回被 VS2 装配协程事后清掉的格子。
+- `VsPilot.launch` 传入 `captured.keySet()` + `shipState.compartments()`。
+
+### 物理船浮力
+
+- `VsThruster` 加"深度保持"：没有垂直输入（且压载/进水≈0）时，
+  垂速阻尼 `-vy×2.0` + 深度误差回拉 `(holdY-y)×0.8`，锁在松开按键那一刻的深度。
+  修用户实测"物理船一直往上浮"。有垂直油门/压载/进水时自动让开。
+
+### 新增命令入口
+
+- `/barotrauma ship sonar`：打开声纳界面（不依赖方块右键）。
+  其余 `throttle / stop / power / autopilot / vs *` 保留。
+
+### 验证
+
+```
+build --offline                  ✅
+L1 17 用例 / L2 3 GameTest        ✅（本轮大改前跑过；改后 build 绿 + 两套自检绿）
+.smoketest（总自检）              ✅ 402 船体方格 + 声纳×1；质量 3156000/3156000
+  装配后 10s：舱室水=0（别的=273 是排水体）｜船体格水=0（别的=402）
+  拆回：铺回 403 格
+.smoketest-vs（隔离）             ✅ 原始装配 40 tick 水=125；正式管线水=0 排水体 125；
+                                  拆回后舱内空气 26
+```
+
+### 仍未解决 / 待用户实测
+
+- 玩家"卡在玻璃方块里"：未单独定位；可能与玩家在船内装配后的碰撞/随船移动有关，
+  等新版本实测复现再查。
+- VS2 2.4.11 物理船上不能破坏方块（硬限制）：拆船后编辑，或接受。
+- 4 秒后船坞区块超时警告仍在（无头环境固有），`ensure` 已兜底。
+
+## 10.43 舱内真空气 + 声纳交互锚点（2026-11-02 凌晨，用户拍板可玩性优先）
+
+> 用户反馈："你让船舱不进水的实现方式是往船里面填满那个排水方块吗？这条路不行，
+> 潜艇上的方块肯定不能不交互。" 并要求"以后再做先考虑可玩性"（已记入长期记忆）。
+
+### 舱内改真空气
+
+- `HullPlug.install` 只接收**船壳方块**的位置（`captured.keySet()`），舱室格子不再填。
+- 船整格移动时，`VsPilot.clearInteriorWater(level, dx,dy,dz)` 把新位置舱室里的水清成空气
+  （只在整数偏移变化时扫一次；空腔自检：舱室 273 格里 272 格是空气，1 格是声纳锚点）。
+- 挪走/拆船时，排水体腾出的格子回填海水（§10.42）。
+- 保留 `ensure` 每 tick 补被 VS2 装配协程清掉的船壳格子。
+
+### 声纳交互锚点（解决"船上右键不到方块"）
+
+- 新增方块 `barotrauma:sonar_proxy`（不可见、不碰撞、不可破坏，无物品、不进创造栏；
+  不属于 `isShipBlock`，不会被扫描/二次装配）。
+- `VsPilot.launch` 在装配成功后，把锚点放在声纳原来的位置；`moveProxy` 每 tick 跟着
+  船整格移动；`dock` / `dropStale` 时撤掉。
+- 右键锚点 = 打开同一个声纳界面（`SonarProxyBlock.use`）。
+- `BlockEvent.BreakEvent` 取消对锚点的破坏（创造模式也拆不掉）。
+- 命令入口 `/barotrauma ship sonar` 保留作兜底。
+
+### 验证（02:31 日志）
+
+```
+隔离自检：阶段2 装配后 40 tick：水=0 空气=26 排水体=98 别的=1（5×5×5 测试船）
+总自检：舱室格 273（水=0 空气=272 别的=1）｜船体格 402（别的=402）
+        10 秒后同上；拆回 403 格
+outpost leaked water blocks = 0
+```
+
+### 仍未做（VS2 2.4.11 硬限制）
+
+- **物理船上不能破坏方块**：VS2 没有 `ServerPlayerGameMode`/`useItemOn` 的坐标重映射，
+  客户端射线拿到的是船坞坐标，服务端按距离校验拒绝。要支持"打穿船壳进水"需要
+  我们自己在产物包里拦 `ServerGamePacketListenerImpl` 的 use/break 包（工作量中等，风险较高）。
+  当前用交互锚点覆盖了"控制方块必须能用"这个可玩性核心；破坏船壳暂缓。
+
+### 10.43 补充：用户实测（02:36–02:38 客户端日志）
+
+- 02:36:03 装配成功：403 格，质量 809700/809700（100%）。
+- 02:38 期间船开出去 **偏移 (22, 13, 79)**——声纳界面能操作、船能开。
+- 每走一格都有 `[vs] 舱内排水：清掉 N 格（偏移 x,y,z）`，舱内始终是空气
+  （N 通常 40~91，只有新进入水的格子）。
+- 聊天里出现 `实时｜...` 说明船控面板指令在发（声纳界面确实打开了，交互锚点生效）。
+- 顺带清掉机器时代的界面噪音：`liveReport` 不再报温度/功率/氧气/气闸，
+  只报「舱内水 / 进水% / 航向 / 推力」；`MachineCount.describe` 只报声纳。
+
+### 10.43 补充 2：自动驾驶与声纳船体点（用户 02:40 反馈）
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| 自动驾驶不会动 | `tickMovement` 删除后，`aimAtTarget` 没有任何调用点了；物理船只会照 `ShipState.throttle` 推，而它是 0 | 新增 `ShipState.autopilotStep(currentPos)`（直接写 throttle，不走 `setThrottle` 以免退出自动驾驶）；`VsPilot.tick` 在算完整数偏移后调用它，再 `applyControl` 推给 VS2 |
+| 声纳里的船体点不跟船走 | 声纳扫描以玩家（船）为中心，但 `geometry().hull()` 是**装配时**的世界坐标；船开走后点还留在原地 | `SonarPingPacket.hullForSonar`：物理模式下把船体点按 `VsState.offsetX/Y/Z` 平移 |
+
+- 下潜慢 / 上浮快：用户明确说**先不管**，等以后做压载舱再调垂直加速度。
+- 本轮验证：build ✅、L1 17 ✅、隔离自检 ✅（水=0 空气=26 排水体=98 锚点=1）。
+
+## 10.44 船体耐久 / 漏水 / 框架（用户 2026-11-02 睡前提出的目标）
+
+> 用户："船体能不能不改成排水方块？因为会一直来回乱闪。而且后期我想做成类似潜渊症那样，
+> 船体方块每个都有损坏程度，耐久度低时漏水，为 0 时只剩框架能让玩家/怪物钻出去。"
+
+### 为什么排水体不能完全去掉
+
+VS2 装配把船体方块搬进船坞，世界船位是空的。海里的一块空气必须有方块挡水，
+所以船壳位置一定有"替身方块"。它不是把船体改掉，而是替身；舱内已经是真空气。
+
+### 闪烁：已修（待实测）
+
+- 根因假设：船静止在小数 .5 附近时 `Math.round(pos - assembledPos)` 每 tick 在 N/N+1 之间跳，
+  排水体跟着每 tick 挪一格、旧格回填水 → "来回乱闪"。
+- 修法：`VsPilot.stableOffset` 迟滞死区（离当前格 < 0.62 不换格）。build/L1 ✅，待用户实测。
+
+### 耐久系统设计（下一轮做，先记方向）
+
+**路线 A：VS2 船坞方块上做（推荐先做，见效快）**
+
+| 需求 | 实现 |
+| --- | --- |
+| 每块耐久 | `ShipDamage` 表（按方块相对偏移存 HP），碰撞/攻击/怪物扣血 |
+| 耐久低漏水 | 该格排水体从 `hull_plug` 改成水，且**暂停 clearInteriorWater**（有破口时让水自然灌满） |
+| 耐久 0 开洞 | 删除船坞里那块方块（VS2 质量/碰撞更新），排水体对应格改水；洞是真实可穿的 |
+| "框架" | 用无碰撞形状的自定义方块占位（VS2 碰撞当空气，但仍渲染成框架）替换 0 耐久格 |
+| 玩家/怪物钻出 | 洞格无方块/无碰撞，实体自然可过 |
+
+风险：VS2 的方块更新/质量重算、渲染同步；但比换物理方案小。
+
+**路线 B：回到"方块留在世界里"（最终最像潜渊症）**
+
+- 破损=方块状态变化，水从洞自然流入，没有排水体、没有闪烁。
+- 代价：移动只能整格（需客户端平滑渲染 + 自定义碰撞），等于自己写移动/渲染层，工作量以周计。
+- 如果 A 路线在 VS2 同步上反复踩坑，再切 B。
+
+**当前决定**：先修闪烁；耐久系统下一轮按路线 A 做最小闭环（HP→漏水→开洞→框架）。
+
+### 10.44 补充：半格错位 / 自动驾驶惯性 / 舱内残水（2026-11-02 中午）
+
+#### 闪烁的真正原因：连续渲染 vs 整格排水体
+
+用户："由于排水体是方块形态，所以在方块船 y 轴位置不是整数的情况下能看见半个凸出来的方块。"
+VS2 的船按**连续坐标**渲染，排水体/水是**整格方块**——船 y=-69.4 时，船壳的渲染面和
+方块边界差 0.4 格；透明船壳直接把这个"半格水/缺口"露出来，船一动就来回闪。
+
+- **固有错位，不能消除**（除非把船渲染也量化到整格，那会变成跳格移动）。
+- 缓解：**船壳别用透明方块**。`StarterSub` 改成不透明 `submarine_plating` + 玻璃舷窗；
+  玩家自建的透明壳船仍会看到这个现象。
+- 偏移迟滞（`stableOffset`，0.62 格死区）保留，减少静止时的方块/水来回换。
+
+#### 自动驾驶：加惯性补偿（PD）
+
+`ShipState.autopilotStep(x,y,z,vx,vy,vz)`：
+期望速度 = 位置误差 × 0.5（限幅 6 格/秒水平、2.5 垂直），
+推力方向 = 期望速度 − 当前速度 → 接近目标会提前反向刹车；到点 1.5 格内且速度 < 0.6 自动收油。
+
+#### 舱内残水：每 10 tick 兜底清一次
+
+船移动时偶尔有几格水从船壳/排水体边界缝挤进舱内，只按"整数偏移变化"清会漏。
+`VsPilot.tick` 每 10 tick 调 `clearInteriorWaterNow`（强制清舱室格的水）。
+
+#### 《潜渊症》实现参考（本机 Steam 版 Barotrauma.dll + PDB 反射导出）
+
+源码不公开，但类结构可读（工具：`tools/AsmDump`，用 `dotnet csc` + `System.Reflection.Metadata`）：
+
+| 类 | 关键成员 | 机制 |
+| --- | --- | --- |
+| `Hull` | `waterVolume`、`pressure`、`surface`、`oxygen`、`ConnectedGaps` | **水按舱室体积存**，水面高度由体积换算；不是逐格流体 |
+| `Gap` | `open`、`higherSurface/lowerSurface`、`waterFlowThisFrame`、`ConnectedWall` | 舱室之间/舱室与外界之间的开口；`UpdateRoomToRoom` / `UpdateRoomToOut` 按两侧水位差算流量 |
+| `Structure` | `Sections`、`LeakThreshold`、`BigGapThreshold`、`SmallGapOpenness`、`LargeGapOpenness`、`AddDamage`、`SectionIsLeaking` | 墙面切成 `WallSection[]`，每段独立 `damage`；到漏阈值开始渗水，到大洞阈值开洞 |
+| `WallSection` | `damage`、`gap` | 一段墙的状态 |
+
+**对我们的映射**：每块船体 = 一个 WallSection；damage < LeakThreshold 不漏，
+≥ LeakThreshold 慢慢往舱室 `waterUnits` 加水，≥ BigGapThreshold 删方块 + 排水体开洞（大流量）。
+水按舱室 `waterUnits` → `ShipWater` 从舱底铺格，和原版一个模型。
+
+## 10.45 方向调整：方块船回归（2026-11-02 中午，用户拍板）
+
+> 用户结论：VS2 的半格错位/不能破坏方块没法接受；要"船壳本身挡水 + 每块耐久/漏水/框架"。
+> 用户答复："读 VS2 源码重新改一个物理"（已提供 VS2 仓库和 wiki 链接）。
+
+### 本轮做了什么（MVP，可玩性优先）
+
+- **恢复方块船移动**（`ShipMover` 从 git 恢复，`ShipState.tickMovement/applyStep/slide` 恢复），
+  `ShipCoreBlockEntity.serverTick` 重新调用；VS2 物理船代码保留但不再是主路径。
+- **提速**：`ShipPhysics.MAX_SPEED` 6 → **10 格/秒**，`MAX_RISE` 2.5 → 3.5（减少跳格感）。
+- 方块船 = 船体方块留在世界里：船壳天然挡水、破洞天然进水、方块可交互/可破坏，
+  不再需要排水体、声纳锚点、半格错位也不存在。
+- 验证：build ✅、L1 17 ✅（速度断言同步更新为 8.92 / 0.97）、总自检 ✅。
+
+### 下一步（自己的"物理"层，按优先级）
+
+1. **平滑移动**（核心）：服务端保持整格权威移动，客户端把船体渲染成插值后的"幽灵"，
+   解决 10 格/秒下的跳格感。VS2 的 `ClientShipTransformProvider` / 渲染思路可参考，
+   但方块留在世界、服务器碰撞/水仍按整格。
+2. **耐久系统**（PLAN §10.44 路线 B）：每块船体 HP → 低耐久漏水（往舱室 waterUnits 加水）
+   → 归零开洞（方块消失，水自然灌入）。
+3. VS2 物理船代码暂时保留（`/barotrauma ship vs *`），确认方块船稳定后再决定删不删。
+
+### 提醒
+
+- 旧的 `ShIPhysicsTest` 断言已随新速度更新；以后改速度记得同步测试。
+
+### 10.45 结论：方块船否决，VS2 回归主路径（同日）
+
+用户实测："方块船太烂了，移动的时候都找不到声纳，而且乱闪。"
+原因：方块船是"两端整格"——玩家/声纳跟着整格跳、400 多块方块每 2 tick 重写一次，
+视觉和操作都不如 VS2。**方块船移动已关闭**（代码保留，等以后做"服务端整格+客户端插值"时再用）。
+
+**VS2 的物理粒度（回答用户提问）**：服务端和客户端都是**连续**的——
+vs-core 以约 60Hz 做刚体积分、transform 是连续位置+四元数；客户端插值渲染；
+方块只是搬到船坞区块当体素数据，世界里没有整格搬动。所以"平滑的船 + 格子的水"
+必然出现半格错位；只能靠不透明船壳/舷窗遮掩，或者把水也做成平滑渲染（不现实）。
+
+**下一步（可玩性优先）**：VS2 主路径 + 自己补上它缺失的方块交互
+（在产物包里拦 `ServerGamePacketListenerImpl` 的 use/break，把船位坐标映射到船坞坐标），
+这样船能开、声纳/方块也能点；耐久/漏水再在这个基础上做。
+
+## 10.46 《潜渊症》船/水实现（反编译源码结论）与我们的"双物理化"设计
+
+> 用户目标："把船和水都物理化"。本机 Steam 版 `Barotrauma.dll` + PDB 已用 ilspycmd 8.2 反编译，
+> 结论来自真实代码（`_baro_src/Hull.cs`、`Gap.cs`、`Structure.cs`），不是推测。
+
+### 原版怎么做（2D）
+
+**Hull（舱室）= 水体积容器**
+```csharp
+Volume = rect.Width * rect.Height;                 // 舱室体积
+surface = rect.Y - rect.Height + WaterVolume / rect.Width;  // 水面高度 = 舱底 + 水体积/宽度
+Pressure = surface;                                // 压力直接等于水面高度
+```
+
+**Gap（开口）**
+```csharp
+// 舱室 ↔ 外界（进水）：
+num  = Size * open * open * (1 - overlapReduction);   // 开口面积 × 开度²
+flow = 500 * num * dt;                                // 每秒 500 单位/单位开口
+flow = min(flow, Volume*1.05 - WaterVolume);          // 不超过剩余容积
+
+// 舱室 ↔ 舱室：
+num  = Size/100 * open * (1 - overlapReduction);
+flow = min((P_high - P_low) * 300 * num * dt,
+           min(源舱水量, 源舱体积));                    // 压差驱动
+flow = min(flow, 目标舱 Volume*1.05 - WaterVolume);
+```
+水面的波动是 `WaveY/WaveVel` 弹簧网格（`CreateWave`），只影响渲染。
+
+**Structure（墙）= 逐段耐久**
+```csharp
+LeakThreshold   = 0.10f;   // damage ≥ 10% MaxHealth → 生成 Gap（开始进水）
+BigGapThreshold = 0.70f;   // ≥70% → 大洞
+SmallGapOpenness = 0.35f;  // 10%~70% 之间开度 0→0.35 线性
+LargeGapOpenness = 0.75f;  // ≥70% 开度往 0.75
+// damage < 10% 时把已有 Gap 移除
+```
+墙被切成 `WallSection[]`，每段独立 damage/gap；`AddDamage/SectionIsLeaking`。
+
+### 我们的 3D 映射（设计）
+
+| 原版 | 我们 |
+| --- | --- |
+| Hull 矩形体积 | `ShipGeometry.Compartment`（格子集合）+ `Volume = 格子数`（1 格 = 1 m³） |
+| surface = 底 + vol/宽 | 逐层填充：按 Y 累计截面积，水面 = 填满的层 + 部分层比例（`ShipWater` 已有底部铺格逻辑） |
+| Pressure = surface | 用世界深度/水面高度；与大水体连通时按外界压力 |
+| Gap | 被破坏的船壳格（或 0 耐久格）作为开口 |
+| 开口流量公式 | 直接复用：外界进水 `K_out·面积·open²·dt`；舱间 `K_rr·压差·面积·open·dt`（常数按 MC 尺度调） |
+| Structure/Section | 每个船壳方块 = 一段墙，独立 HP；10% → 小漏，70% → 大洞，0 → 方块消失 |
+| 水的渲染 | **舱内自绘平滑水面**（船本地坐标的平面/四边形），不再用 MC 水方块；这样船和水都是连续渲染，半格错位消失 |
+
+### 关键取舍
+
+- **舱内不写字方块**，水面由客户端按 `WaterVolume/Volume` 渲染（半透明平面 + 轻微波浪）。
+  舱内看到的是平滑水面；船外仍是 MC 海水方块（隔着外壳看，不影响）。
+  破口进水时水面上升是连续的，不会再出现"半格水/方块闪"。
+- 船体仍是 VS2 刚体（连续物理）；方块留在船坞，不参与世界水。破损时删除船坞方块 +
+  在 Gap 模型里开洞，水流按公式走。
+- 浮力：用 `WaterVolume/Volume` 和舱室位置算排水量，给 VS2 加浮力/重力（替代当前"中性补偿"）。
+
+### 下一步（实现顺序）
+
+1. `ShipWaterVolume`：每舱室体积/水量/水面高度，10Hz 更新（替换现有方块水位写法）。
+2. `GapModel`：从船壳破损格生成开口，按原版公式算舱外/舱间流量。
+3. 客户端水面渲染（船本地坐标，VS2 transform 绘制）。
+4. 耐久：每块 HP → 10%/70% 阈值 → 开洞/删方块。
+5. 浮力接物理：按舱室水量算排开体积，影响垂直加速度。
+
+### 10.46 补充：Physics Mod 调研 + 排水方块去留（用户问）
+
+**haubna/PhysicsMod**（130★）：仓库只有文档和 RagdollHook 示例，没有完整源码（Pro 功能闭源）。
+其 "Ocean Physics 3.0" 是**给 Iris shaderpack 用的 API**（`gbuffers_water` 里调
+`physics_oceanVertex/Fragment` 做波形位移/法线/泡沫），**纯客户端渲染，不是服务端流体模拟**。
+可参考其"客户端自绘海面"的思路，但不能直接拿来解决舱内进水/浮力。
+
+**要不要排水方块（用户问）**：
+- 按"舱室水体积 + 开口流量"模拟后，舱内的水不再是 MC 水方块，所以**不需要用排水方块来挡舱内水**。
+- 但船用 VS2 时，世界船位是空的，舱外 MC 海水仍会灌进那片空间 → 仍然需要阻止它：
+  - (a) 排水方块（有半格错位，用户不接受）；
+  - (b) **拦截流体流动**（mixin 阻止 MC 水流入船体包围盒）——没有方块，但水边界仍是格子，
+    半格在"船外水 vs 船壳"交界处仍可能出现（只是没有隐形方块）。
+- **真正消除半格**只有把船外的水也自绘（像 Physics Mod 的海面），成本高。
+  可玩性优先的折中：不透明船壳 + 小舷窗（已做），排水方块换成流体拦截，
+  舱内水按体积模拟 + 平滑水面。
+
+**结论**：可以去掉排水方块，改为流体拦截；这解决"船壁进水"（按耐久/开口模拟，而不是 MC 水灌）
+和"隐形方块凸半格"的观感，但船外 MC 水与船壳的交界半格只能靠不透明船壳遮掩。
+
+## 10.47 去掉排水方块：流体拦截（M1，已完成并验证）
+
+> 用户："排水方块和船 y 轴高度不一样多出来半格太难受了，就解决船壁会进水的问题就好了。"
+> 决定：不铺排水方块，改为**拦截 MC 水流进船体体积**；海面自绘（M2）后续做。
+
+### 实现
+
+1. **MixinGradle 接入**：`build.gradle` 加 `org.spongepowered.mixin` 插件 + `mixin { add sourceSets.main,
+   "barotrauma.refmap.json"; config "barotrauma.mixins.json" }`；新建 `barotrauma.mixins.json`。
+2. **`ship/water/ShipVolumeGuard`**：记录物理船的装配包围盒 + 整数偏移；
+   `activate / setOffset / deactivate / isProtected`。
+3. **`mixin/LevelFluidGuardMixin`**：注入 `Level#setBlock(BlockPos, BlockState, int, int)` 的 HEAD，
+   目标是水且位置在物理船体积内 → 直接取消。选 `setBlock` 是因为 MC 水流扩散最终都走这里。
+4. **`VsPilot`**：装配成功后 `ShipVolumeGuard.activate(...)`；每 tick `setOffset`；
+   `dock` / `dropStale` / 装配失败回滚时 `deactivate`。
+   **不再调用 `HullPlug.install/ensure/moveTo`**（`HullPlug.remove` 保留，用于清理旧存档的排水体）。
+5. 声纳交互锚点、舱内排水逻辑保留。
+
+### 验证（`run/.smoketest-vs`，12:38 日志）
+
+```
+阶段1（原始装配，无拦截）：装配后 40 tick  水=125             ← 对照
+阶段2（正式管线 + 拦截）：装配后 40 tick  水=0 空气=124 排水体=0 别的=1
+判定：没有排水体、也没有水 → 流体拦截（ShipVolumeGuard）生效
+汇总：原始装配后水=125｜正式管线后水=0 排水体=0｜拆回后水=0
+```
+
+- 舱内是真正的空气（124 格空气 + 1 格声纳锚点），**没有任何排水方块**；
+- 船外的 MC 水照常存在，只是写不进船体体积；
+- `build --offline` ✅；L1/L2 之前已绿（本轮只加 mixin/guard，仍需回归确认）。
+
+### 已知限制 / 下一步
+
+- 船外 MC 水与船壳的交界仍是格子边界（没有方块了，但水是格子）；彻底消除要等 **M2 海面自绘**。
+- 持久化：重进世界后 `VsPilot`/`ShipVolumeGuard` 状态丢失，已存在的船不会被认领（旧问题）。
+- 下一步顺序：M2 客户端平滑水面 → M3 舱室水体积/Gap 流量 → M4 每块耐久/漏水/框架。
+
+## 10.48 M2 水体皮肤 + M3 破口渐进进水（2026-11-02 下午）
+
+### M3：舱室水体积 → 渐进进水（服务端，可验证）
+
+- `ShipSimulation` 原本已有"每舱室水量 `double[] water`"（1 格 = 100 单位）。
+- 新增 `pocketWater[]`（连海空腔 = 破口舱室）与 `tickSeaFlood(dt, depthMeters)`：
+  `flow = 2 格³/秒 × (1 + 深度/100) × dt`，按空腔容积封顶。
+  参照反编译的《潜渊症》`Gap.UpdateRoomToOut`（原版 `500 × Size × open² × dt`，我们做了尺度简化）。
+- `ShipWater.apply` 里连海空腔不再"直接满水"，而是按 `pocketWater` 铺格。
+- `ShipCoreBlockEntity.serverTick` 每 0.1s 调 `tickSeaFlood`。
+- 新 L1：`ShipFloodingTest`（破口 → 水量随时间增加、被容积封顶）✅。
+
+### M2：海面自绘第一版（水体皮肤）
+
+- `network/VsShipSkinPacket`：装配时把"船 id + 相对船中心的包围盒"发给所有玩家，拆船时发 inactive。
+- `client/WaterSkinRenderer`：`RenderLevelStageEvent(AFTER_TRANSLUCENT_BLOCKS)`，
+  玩家在船体附近时，用半透明水色体积（`RenderType.debugFilledBox`，双面、不写深度）
+  包住船体包围盒，把"船外 MC 水 vs 船壳"的格子边界盖住；从外面看不会罩住船。
+- 这是第一版观感验证：颜色/透明度/范围都可调；下一步可换成真正的水面/体积着色 + 波浪。
+
+### 验证
+
+```
+build --offline            ✅
+L1（18 用例，含 ShipFloodingTest） ✅
+L2 GameTest                ✅
+.smoketest-vs              ✅ 阶段2 水=0 空气=124 排水体=0（流体拦截仍生效）
+```
+
+**水体皮肤是纯客户端渲染，服务端验不了，需要用户进游戏看观感。**
+
+## 10.49 M2 v1 失败复盘：水体皮肤撤掉 + 停写 MC 水（2026-11-02 下午）
+
+用户实测反馈：
+1. 水体皮肤"衔接怪、不平滑"——截图里墙上的大块蓝灰就是**盒子内壁**；盒子是 AABB，
+   不是真的水面，观感失败。
+2. 非物理模式"水变无限水、水生水、海绵没用"——根因是 `ShipWater.apply` **每 10 tick
+   重写 MC 水源方块**：海绵吸掉后又被写回来；填满的一层水源在密封舱里还会互相生成。
+3. 启动物理后"水变半格进不来、船一开瞬间灌满"——流体拦截区是**整格对齐**的，
+   和连续渲染的船壳差半格；船移动后新位置本来就有海水，旧代码只清舱室格、没清船壳格。
+
+处理：
+- **删除** `WaterSkinRenderer` / `VsShipSkinPacket`（盒子方案作废）。
+- **停止** `ShipCoreBlockEntity` 里的 `applyWater`：不再把水位写成 MC 水方块。
+  舱内水只作为模拟量存在（`ShipSimulation`），修掉无限水/海绵问题。
+- `VsPilot.clearShipVolumeWater`：船移动时清**船壳格 + 舱室格**里已有的水，
+  修"一开船瞬间灌满"。
+- 物理船体积内仍然用 `ShipVolumeGuard` 流体拦截（不让 MC 水写进来）。
+
+验证：build ✅、L1/L2 ✅、隔离自检 阶段2 水=0 空气=124 排水体=0 ✅。
+
+**下一步（真正的 M2）**：客户端**平滑水面渲染**——按舱室 `waterUnits/Volume` 算水位，
+在船本地坐标绘制半透明水面（不是 AABB 盒子），水面高度连续变化；必要时再加简单波浪。
+这一步做完，船内进水才"看得见"且不闪。
+
+## 10.50 船内平滑水面渲染（M2 真 v1，2026-11-02 傍晚）
+
+- 服务端 `VsPilot.sendWaterState`：每 10 tick 把每个舱室的包围盒（装配世界坐标）+
+  连续水面高度发给客户端（`ShipWaterStatePacket`）；拆船发空包。
+- 客户端 `ShipWaterRenderer`：找到物理船的实时渲染位置，按 `渲染位置 − 装配锚点` 平移，
+  用半透明水体（`debugFilledBox`）画每个舱室"舱底到水面"的体积。
+  水面高度是连续值，进水时平滑上升，不再有 MC 水的半格跳变。
+- 船内不再写 MC 水方块（无限水/海绵问题已修），水只作为模拟量 + 自绘。
+
+**关于"做成潜渊症那样真实的水"的结论**：
+- 《潜渊症》的水也不是流体粒子模拟，而是"舱室水体积 + 水面高度 + 开口流量"——
+  这部分我们已经按原版公式实现，船内水面可以画得像原版（平面 + 波浪）。
+- 船外的海洋是 MC 方块水；要做成平滑海面需要**自绘/着色器替换原版水渲染**，
+  是渲染层的大工程（Physics Mod 的 Ocean Physics 也是闭源 Pro + Iris shader）。
+  建议分步：先船内水面 → 再考虑船外水面覆盖层 → 最后才谈全海洋自绘。
+
+## 10.51 物理船破口进水链路打通 + 物理船砸方块（2026-11-02 晚）
+
+### 根因（用户："你的屎山代码互相打架了 水进不来"）
+
+1. **物理船只跑了半套模拟**：`VsPilot.tick` 每 2 tick 调用 `ShipSimulation.tick()`，
+   但 `tickSeaFlood()` 只在 `ShipCoreBlockEntity.serverTick` 里调用；物理船的方块实体
+   在船坞里，`serverTick` 会提前 return。结果：破口空腔的 `pocketWater` 永远是 0。
+2. **每 10 tick 强制清船体体积里的水**：`VsPilot.clearShipVolumeWaterNow` 无条件把
+   舱室格 + 船壳格的水删掉。就算有别的路径把水写进来，也会被立刻擦掉。
+3. **物理船砸方块服务端根本没生效**：VS2 2.4.11 只重映射了放置，没有破坏；
+   客户端砸掉的是渲染层/船坞里的方块，服务端世界里那一格是空气，原版 `destroyBlock` 打空。
+4. **船坞坐标不知道**：船体方块被 VS2 搬到远处的 claim 区域；没有平移量就既读不到"洞"、
+   也删不掉真正的方块。无头服务器里船坞区块不 tick，核心方块实体报不上坐标。
+
+### 修复
+
+- `VsPilot.tick`：在物理船的模拟步里补上 `tickSeaFlood(0.1, 深度)`；
+  删除每 10 tick 的强制清舱内水，只在**整数偏移变化**时清一次。
+- `ShipVolumeGuard`：从"整个船体包围盒"改成**只保护舱室格**（装配原坐标 + 整数偏移）。
+  船壳格让海水自然填满，透过破口看出去不再有一圈干空气。
+- `VsPilot` 新增船坞偏移：
+  - 优先由核心方块实体在船坞里 tick 时上报（`VsState.observePhysicalCore`）；
+  - 无头/区块不 tick 时，围绕 `ChunkClaim` 中心扫半径内的声纳方块反推偏移
+    （日志：`[vs] 船坞偏移（扫 claim 中心）`）。
+- `VsPilot.refreshHull` 每秒拿 `snapshot` 原坐标 + 船坞偏移对账方块；
+  发现破坏就删掉快照项并 `rebuildGeometry`（用船坞方块重新分舱）。
+- 新增 `mixin/ShipBreakMixin`：注入 `ServerPlayerGameMode#handleBlockBreakAction` 的
+  `START_DESTROY_BLOCK`。`VsPilot.tryBreak` 从玩家眼睛沿视线对船体快照做 AABB 射线
+  （带船的小数位移，+1 格余量），命中后删船坞方块、重扫几何、播粒子和声音、
+  生存模式掉物品；声纳台禁止拆。
+- `ShipState.floodRatio()`：分母包含 `openPockets`，分子包含 `pocketWaterTotal`，
+  破船灌水后会真的下沉。
+- `ShipSimulation.copySettingsFrom`：破损重分舱时保留反应堆/压载/气泵设置。
+- 进水速率 2 → **20 格³/秒**（按潜渊症手感，270 格舱约 13 秒灌满）。
+
+### 验证（2026-11-02 13:44，隔离自检）
+
+```
+[vs] 船坞偏移（扫 claim 中心）：(-28514704,-420,12289663)
+[vs] 船体破损：1 格被破坏 → 重扫 0 个舱室 / 1 处连海
+阶段2 破口 40 tick 后：连海空腔 1 处，模拟进水 2800 单位，进水比例 100%
+判定：破口后模拟水开始上涨 ✅
+舱内实际水方块（应为 0，水面是客户端自绘）：0
+阶段2 拆船：铺回 98 格（破口保留，不再补回）
+```
+
+- 外层船壳格水=98 / 舱内水=0：流体拦截只护舱室，船壳格允许海水；
+- 破口后 2 秒灌满 28 格空腔（无头服务器），舱内仍是真空气；
+- `build --offline` ✅、L1（19 用例）✅、L2 `All 3 required tests passed` ✅、
+  `.smoketest-vs` ✅。
+
+### 已知限制
+
+- 物理船砸方块只覆盖**装配快照里的船体方块**；玩家后放的方块暂时不吃这一套。
+- 船外海洋仍是 MC 方块水：透过破口看，交界仍在整数格上（"半格"来源），
+  彻底解决要等船外海面自绘。
+- 水泵只抽密闭舱室，不抽连海空腔（破口够大时泵本来就抽不赢）。
+- `VsPilot`/`ShipVolumeGuard` 仍不持久化：重进世界后已装配的船不会被认领。
+- 客户端水面渲染仍需进游戏看观感。
+
+## 10.52 实测复盘：空气隧道 + 舱底假水 + 水位归零（2026-11-02 晚）
+
+用户实测（沉底 + 进水已生效）反馈三条：
+1. **路过的地方全部变成空气**——船开过/沉过之后海里留下船形空气洞；
+2. **进水效果不对**——舱底只有一小滩水，不像水压把水顶上来；
+3. **没有水压**——底部破洞水不会往上涌。
+
+日志（`run-client/logs/2026-11-02-1.log.gz`）确认的根因：
+
+1. **拦截体漏了船壳的棱和角**：
+   - 第一版只护舱室格（27 格）。船是连续坐标渲染，y 不是整数时舱底会漏出
+     半层没被保护的空间，真实海水钻进来在舱底形成一小滩——截图里那滩水不是自绘水面。
+   - 第二版改成"舱室 6 邻接外扩 1 圈"，无头自检实测只得到 81 格：
+     船壳的 **棱和角** 不在 6 邻接范围内，仍然漏 44 格真实海水。
+2. **船尾没有回填**：船每挪一格，`clearShipVolumeWater` 只清**新位置**，
+   旧位置的舱室/船壳空气永远留在海里 → 开过的地方一条空气隧道
+   （日志里每个整数偏移都有 `舱内排水：清掉 91 格`）。
+3. **每砸一个新洞水位归零**：`rebuildGeometry` 重建 `ShipSimulation`，
+   `pocketWater` 从 0 开始。用户连续砸 6 格，水位被重置 6 次。
+4. **进水速率不随破口大小变化**：固定 20 格³/秒，6 格洞和 1 格洞一样慢。
+
+### 修复
+
+- 拦截格改为 **当前船体快照的全部方块格 + 舱室格**（`buildGuardCells`）。
+  这正好是整个船体体积，不漏棱角；破掉的格子从快照移除，真实海水只允许出现在破口那一格。
+- 清理也清 `guardCells`（船壳 + 舱室）：装配瞬间灌进船壳层的水也会被清掉。
+- 新增 `refillVacated`：整数偏移变化时，把"旧拦截格 − 新拦截格"里仍是空气的格
+  回填成海水，船尾不再留隧道。只在水下回填（8 点采样，水多于空气），
+  停在哨站/洞穴干空气里不会凭空造水。
+- `ShipState.replaceGeometry` / `ShipSimulation.seedWater`：破损重分舱时把旧的
+  密闭舱水量和连海空腔水量按新几何容积重新分配，连续砸洞水位不再归零。
+- `ShipSimulation.setBreachSize`：进水速率 × 破口格数（初始快照数 − 当前快照数），
+  洞越大灌得越快（潜渊症 Gap 的简化）。
+- 诊断日志：
+  - 服务端：`[vs] 流体拦截：舱室 X 格 + 船体 Y 格 = Z 格`、
+    `[vs] 连海空腔：N 格，bbox ...`、每 60 次同步一条 `[vs] 水面同步`；
+  - 客户端：每 40 个包一条 `[water] 收到水面包`，每秒一条
+    `[water] 画水面 ... delta/firstSurface`；找不到 ClientShip 时只警告一次。
+
+### 验证（14:08，隔离自检）
+
+```
+[vs] 流体拦截：舱室 27 格 + 船体 99 格 = 125 格
+阶段2 装配后 40 tick：水=0 空气=124 排水体=0 别的=1
+判定：舱内水=0（外层船壳格水=0）→ 舱内流体拦截生效
+阶段2 破口 40 tick 后：连海空腔 1 处，模拟进水 2800 单位，进水比例 100%
+舱内实际水方块（应为 0，水面是客户端自绘）：0
+```
+
+- `build --offline` ✅、L1（19 用例）✅、L2 `All 3 required tests passed` ✅；
+- 船壳层现在是真空气（不是真实海水），破口后的水只存在于模拟 + 客户端渲染。
+
+### 仍需用户确认
+
+- 客户端自绘水面是否真的出现在舱内（新 `[water]` 日志可定位：
+  包到没到、ClientShip 找到没、delta/firstSurface 是多少）；
+- 船尾回填在真实下沉/开船速度下的观感与性能；
+- 旧存档里已装配的船不会自动认领（`VsPilot` 不持久化），这轮测试请用新世界。
+
+## 10.53 船内水面诊断与最小修复（2026-11-02 18:30，纠正 §10.50–10.52 的若干推断）
+
+> 施工单要求：先保留原差异基线、只加诊断、保持原水体行为；再用实际源码确定坐标与 QUADS
+> 最小修复，单独可逆补丁；不得重写物理/服务端模拟，不得加 AABB 水体皮肤/排水方块。
+
+### 10.53.1 上游来源（先查后改）
+
+- **Forge 47.4.0**（`gradle.properties:forge_version=47.4.0`）：读本机实际源码 jar
+  `.../forge/1.20.1-47.4.0_mapped_official_1.20.1/forge-1.20.1-47.4.0_mapped_official_1.20.1-sources.jar`：
+  - `GameRenderer.renderLevel` 对 level 的 PoseStack 只做 `mulPose(Axis.ZP/XP/YP...)` 相机旋转，
+    **没有** `translate(-camera)`（`GameRenderer.java:1119-1126`）。
+  - `LevelRenderer.renderChunkLayer` 把同一个 PoseStack 交给
+    `ForgeHooksClient.dispatchRenderStage`（`LevelRenderer.java:1559`）。
+  - `RenderType.DEBUG_FILLED_BOX` = `TRIANGLE_STRIP`（`RenderType.java:141`）；
+    `DEBUG_QUADS` = `QUADS + NO_CULL + TRANSLUCENT_TRANSPARENCY`（`RenderType.java:142`）。
+  - `RenderType.end` → `setupRenderState()`（`RenderType.java:426-434`），因此 `endBatch` 前手动
+    `disableCull/depthMask(false)` 会被 state shard 覆盖；`debugFilledBox` 默认
+    `depthTest=LEQUAL`、`writeMask=COLOR_DEPTH_WRITE`。
+- **VS2 2.4.11**（本机实际运行版本）：反编译 jar 的
+  `org.valkyrienskies.mod.common.VSClientGameUtils.transformRenderWithShip`，字节码是
+  `translate(-cam) * shipToWorld * translate(offset)`；父目录 `_vs2src` 的 HEAD 是 `a79995c`
+  （`1.20.1/main`），**不是 2.4.11 tag**，所以以 jar 为准；`_vs2src` 同名源码
+  `common/src/main/kotlin/org/valkyrienskies/mod/common/VSClientGameUtils.kt:46-66` 与 jar 一致。
+- **网络**：经本地代理成功取到 Forge 1.20.x `LevelRenderer.java.patch`（HTTP 200，15929 字节），
+  作为旁证；其余不依赖网络。
+
+### 10.53.2 根因（两条独立，都有源码证据）
+
+1. **坐标空间**：`AFTER_TRANSLUCENT_BLOCKS` 的 PoseStack 只有相机旋转，顶点必须是
+   `world − camera`。旧 `ShipWaterRenderer` 直接提交装配原坐标 + delta（绝对世界坐标），
+   相当于多平移了一次相机位置。VS2 自己渲染船体时也显式做 `translate(-cam)`。
+2. **拓扑/剔除**：旧主水面用 `RenderType.debugFilledBox()`（TRIANGLE_STRIP）提交多个独立 quad；
+   相邻 quad 会被连成错误三角形。该类型默认 CULL=开、写深度；满舱第一人称在水下往上看时
+   水面是背面，会被剔除。旧代码在 `endBatch` 前 `disableCull()/depthMask(false)`，
+   会被 `RenderType.setupRenderState` 覆盖，等于没生效。
+
+### 10.53.3 实现
+
+- `client/ShipWaterRenderer.java`
+  - 诊断默认关闭：`-Dbarotrauma.waterDebug=true` / `BAROTRAUMA_WATER_DEBUG=1` / F9（`:67`、`:125`）。
+  - `[water-diag]` 1 Hz（矩阵 5 s）：camera/eye/player/blockY/cameraEntity/partialTick、ship
+    render/current/prev 完整变换、anchor/delta、水面盒、CPU/GPU 矩阵、顶点数、flush/stage/type
+    （`:615-743`）。
+  - 测试标记：视线前 2 m 三个分离 0.2 m 面；现有管线把三个面放进同一个 `debugFilledBox`
+    （TRIANGLE_STRIP，会看到面之间的连接三角形），诊断管线是三个独立 QUADS——拓扑对照；
+    同位置深度测试开/关对照 + 绝对世界坐标对照；独立 buffer，不污染主水路径（`:479-614`）；
+    不新增世界方块。
+  - 原行为保留：`drawWaterLegacy`（`:240-324`）；`-Dbarotrauma.waterFix=false` 回退。
+  - 修复补丁：`drawWaterFixed`（`:326-457`）用 `debugQuads`（QUADS + NO_CULL + TRANSLUCENT，
+    LEQUAL、写深度）和相机相对坐标；`waterToCamera` 用实际 `renderTransform` 绕装配锚点旋转，
+    避免二次旋转（`:743-754`）。主水面改用**独立** `BufferBuilder`（`:347-349`），
+    不再和 `mc.renderBuffers().bufferSource()` 里的声纳/其它 `debugQuads` 共用批；
+    `endBatch` 外层显式 setIdentity + 0.99975586 缩放（`:415-427`），复刻
+    `VIEW_OFFSET_Z_LAYERING`，降低与船壳共面的 z-fighting。
+- `ship/ShipWaterStateBuilder.java:39-86`：水面高度按 Y 逐层实际格数累计，不再用 bbox 底面积；
+  0/部分/满/超量 clamp。协议仍只有 bbox + surface，水平范围是近似，**不把 bbox 当最终真实水面**。
+- 新增 `ShipWaterStateBuilderTest`：7 用例（0/部分跨层/满/超量/矩形回归/连海空腔）。
+
+### 10.53.4 验证
+
+```
+./gradlew test --offline                  → exit 0，26 PASSED（原 19 + 新 7）
+./gradlew build --offline                 → exit 0，BUILD SUCCESSFUL
+./gradlew runGameTestServer --offline     → exit 0，All 3 required tests passed :)
+run/.smoketest-vs + runServer --offline   → exit 0
+  阶段2 装配后 40 tick：水=0 空气=124
+  破口 40 tick：连海空腔 1 处，模拟进水 2800 单位，进水比例 100%
+  舱内实际水方块：0；拆回后水=0
+```
+
+- 客户端只启动一次，日志进入主菜单加载阶段（`Auto-subscribing ...ShipWaterRenderer to FORGE`），
+  **没有加载世界，未做视觉验证**；computer-use 技能标注 "Main agent only"，本会话是子代理，
+  未使用 GUI 自动化。该次 Gradle 任务是被强制停止的，日志末尾 **BUILD FAILED / exit -1**，
+  只能算启动证据，不能算客户端检查通过。启动日志里 VS2 自带的
+  `MixinVibrationSystemTicker` 错误是 dev 环境既有，未归因本轮。
+- 因此：**"水面已可见"仍未证实**，不能只凭 build/L1/L2 下结论。
+
+### 10.53.5 被纠正的旧推断
+
+- §10.52 的 673/125 guard 数字是不同船体并集，不能用来断言破口保护范围；本轮未改 guard。
+- HUD 183 m vs 船 render -126.5 的 58 m 差不能证明船/水错位；HUD 读实体 Y，不是相机/渲染船位。
+- 第一人称满舱看不到自由面可能是背面剔除，不等同于"没水"。
+- "pose 平移≈0"不是充分证据；本轮同时记录 CPU/GPU 全矩阵和 shipToWorld vs delta 的参考点映射。
+
+
+### 10.53.6 独立复核修正（2026-11-02 19:10）
+
+只读复核发现并已修复以下有事实依据的问题：
+
+1. **诊断 raw QUADS 双重旋转（真 bug）**：初版 `drawRawQuad` 既把事件 pose 烘进顶点，
+   又在 modelview 里 `mulPoseMatrix(pose)`；`BufferUploader` 会使用 modelview，导致旋转两次。
+   已改为顶点只存相机相对坐标、pose 只经 modelview 应用一次（`ShipWaterRenderer.java:566-590`）。
+2. **主水面与声纳共用 debugQuads 批**：主水面原来用 `mc.renderBuffers().bufferSource()`，
+   而 `SonarRenderer.java:46` 也用 `RenderType.debugQuads()`；`endBatch(debugQuads)` 可能提前
+   flush 别人的 pending 顶点。已改为主水面独立 `BufferBuilder`（`:347-349`），诊断也有独立 buffer。
+3. **debugQuads 缺少 VIEW_OFFSET_Z_LAYERING**：`debugFilledBox` 有该 shard，`debugQuads` 没有
+   （`RenderType.java:141/142`）；主水面 `endBatch` 外层显式 setIdentity + 0.99975586 缩放
+   （`ShipWaterRenderer.java:415-427`，对应 `RenderStateShard.java:162-171`），降低共面 z-fighting。
+4. **客户端启动不是通过**：唯一一次 `runClient` 被强制停止，`build/_client_startup.log` 末尾是
+   `BUILD FAILED ... exit -1`；它只到主菜单加载阶段，没有加载世界，也没有 `[water-diag]` 输出。
+   最终渲染器（18:43 之后）没有客户端类加载/世界内验证。
+5. **工作树不是“只显示本轮改动”**：复核时 `git status --porcelain | wc -l` = 101
+   （35 M / 40 D / 26 ??）；`build/_baseline_20261102/` 是定向基线（5 文件 + 1 份旧客户端日志），
+   不是整树快照。既有改动未被 reset/覆盖；本轮源码改动仍只有 3 个文件。
+
+复核修正后的本轮必要检查：`./gradlew test --offline` → exit 0，26 PASSED；
+`./gradlew build --offline` → exit 0，BUILD SUCCESSFUL。L2/smoke 未重跑（只改客户端）。
+**画面与最终客户端代码仍未验收。**
+
+## 10.54 跨世界初始潜艇不生成：静态物理船状态泄漏（2026-11-02 20:45）
+
+用户现象：创建第一个世界后，后续新世界不再生成初始潜艇。
+
+根因（日志 + 源码）：
+
+- `run-client/logs/latest.log` 20:25:19 首世界装配初始潜艇 403 格；20:26:31 第二个世界登录时
+  输出“初始潜艇已收成物理船，跳过重建”，紧接着出现“客户端找不到船 id=4”，随后仍收到旧
+  `ship=4` 的水面包；20:27:11 第三个世界重复同一日志。
+- `StarterSub.ensure()` 原先只要 `VsState.active()` 就返回 null；`VsState.active` 和 `VsPilot`
+  都是进程级静态单例，没有 `ServerStoppedEvent` / `ServerStoppingEvent` 清理；`VsPilot.stillExists()`
+  在查询异常时返回 true，旧世界船句柄不会自愈。
+
+修复：
+
+- `VsPilot.resetForServerLifecycle()`：纯内存清理 `ship/thruster/state/corePos/snapshot/guard/pending/lastLevel`
+  等静态字段；`HullPlug.remove(null)` 只清静态形状，不向旧世界写方块；最后 `VsState.deactivate()`。
+- `DeepSeaEvents`：新增 `ServerStoppedEvent` 处理，并在 `ServerStartedEvent` 兜底再清一次；
+  `resetShipRuntime()` 只在 VS2 可用时加载 `VsPilot`，没装 VS2 也不会触发类加载。
+- `StarterSub.ensure()`：只有 `VsState.corePos()` 等于初始潜艇核心时才跳过；玩家先装了别的船时，
+  初始潜艇仍会生成；新增“初始潜艇已建造”日志。
+
+验证：
+
+```
+./gradlew test --offline                → 26 PASSED，BUILD SUCCESSFUL
+./gradlew build --offline               → BUILD SUCCESSFUL
+./gradlew runGameTestServer --offline   → All 3 required tests passed :)
+run/.smoketest-vs + runServer --offline → BUILD SUCCESSFUL
+  阶段2 装配后 40 tick：水=0 空气=124
+  破口 40 tick：连海空腔 1 处，模拟进水 2800 单位，进水比例 100%
+  舱内实际水方块：0；拆回后水=0
+```
+
+日志确认服务器启动/停止都会执行 `[Barotrauma] 已清理物理船静态状态`。
+
+未覆盖：多世界客户端流程仍需手动验证（世界 A 装船不拆 → 退回标题 → 世界 B 看初始潜艇是否生成）。
