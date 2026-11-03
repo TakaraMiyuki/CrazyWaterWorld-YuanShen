@@ -4,6 +4,27 @@
 
 Git 提交、推送和拉取是三个独立动作，每一项都需要人类明确授权；AI 不得默认执行。
 
+## 新机器：先装 MEX 工具
+
+`.mex/` 和 `.zcode/` 会随 Git 克隆，但 **MEX CLI 和 ZCode 插件是本机工具，不会随仓库走**。新开发者第一次在这个仓库开工时，Agent 先检查：
+
+- `mex --version` 能输出版本（当前 `0.8.5-zcode.1`），或 ZCode 里 `/mex` 能返回状态 → 已安装，继续。
+- 两者都不行 → 主动提出安装。部署包 `MEX-ZCode-CN` 由维护者线下分发，包内应有 `cli/`、`plugin/` 和 `install.cmd`；**不要编造下载地址**。
+
+找到部署包后，先向人类说明“将安装本机 CLI、注册 ZCode 本地插件市场并修改用户级插件配置”，得到确认再运行包根目录的 `install.cmd`。装完让人类完全退出并重开 ZCode。
+
+新会话里再执行：
+
+```bash
+mex graph rebuild
+mex wiki rebuild-index
+mex check
+```
+
+本仓库已有 `.mex/`，**不要**再运行 `mex setup` 或 `deploy-to-project.cmd`。`graph.db` 和 `wiki.db` 在 `.mex/.gitignore` 里，只生成本地缓存，不要提交。
+
+只写代码时 CLI 可用即可；需要 MCP 工具、`/mex-*` 快捷命令和 Hub 入口时再装插件。
+
 <!-- mex-agent:skills:start -->
 ## MEX agent skills
 - At the start of every session, read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work; follow `ROUTER.md` to load only the relevant context.
