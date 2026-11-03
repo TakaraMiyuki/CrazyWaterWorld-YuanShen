@@ -43,9 +43,9 @@ mex:
 1. Forge 调用 `BarotraumaMod` 构造器，注册方块、物品、方块实体、菜单、实体和维度生成器。
 2. 声纳台方块实体（`SonarBlockEntity`，继承 `ShipCoreBlockEntity`）扫描周围船体方块，`ShipGeometry` 把船体分成密闭舱室和连海空腔。
 3. `ShipSimulation` 为每个舱室维护一个标量水量；破口、水泵、压载、反应堆都改这个数值，不直接写世界水方块。
-4. 如果装了 Valkyrien Skies 2，`VsPilot` 把整船方块收进 VS2 物理船，逐 tick 把推进、压载、进水比例同步给 `VsThruster`，并按需把船内状态打包成 `ShipWaterStatePacket` 发给客户端。
+4. 如果装了 Valkyrien Skies 2，`VsPilot` 把整船方块收进 VS2 物理船，逐 tick 把推进、压载、进水比例同步给 `VsThruster`，并按需把船内状态（舱室拆分成的矩形棱柱 + 水面 + 破口位置/所属空腔/朝内方向/空腔上下界）打包成 `ShipWaterStatePacket` 发给客户端。
 5. 深海维度是空气海域：`DeepSeaChunkGenerator` 生成岩层和空腔，`OceanEnvironment` 用维度高度、哨站盒子和船内干燥区判断“是否浸没”。
-6. 客户端只做表现：`SonarScreen` / `SonarRenderer`、`DepthOverlay`、`UnderwaterEffects` / `UnderwaterMovement`、`ShipWaterRenderer` 的水面绘制已被 `RENDER_WATER = false` 关闭。
+6. 客户端只做表现：`SonarScreen` / `SonarRenderer`、`DepthOverlay`、`UnderwaterEffects` / `UnderwaterMovement`、`ShipWaterRenderer` 负责舱内水面绘制（客户端自绘，10 Hz packet + 逐帧插值）以及破口进水视觉（空气侧水花、水下气泡）。
 
 ## Key Components
 
@@ -72,5 +72,5 @@ mex:
 - **没有真实海水方块**：深海维度是空气，水下感由客户端雾/滤镜和 `UnderwaterSurvival` 提供；不要再往海里放 `Blocks.WATER`。
 - **没有物理船持久化/世界加载认领**：服务器重启后已装配的 VS2 船不会被 `VsPilot` 找回，`ShipState`、guard cells、声纳代理和推进器都要重新建立。
 - **没有多船支持**：`VsPilot` 是 `static` 单例，同一时刻只管理一艘物理船。
-- **没有逐格水面几何**：每个舱室只有 bbox + surface 一个水平面；非矩形舱室的视觉精度有限。
+- **没有逐格水面几何**：舱室按 Y 层贪心拆成矩形棱柱；连海空腔按 1×1 竖直列发盒子，每列自己的水位由 `ShipPocketWater` 计算（相邻列最低共享格子 = 溢流口，多个隔断依次传递）。一个 Y 层内仍是整块矩形，不做逐格方块边界的流体表面。
 - **没有服务端渲染**：所有画面都在 `client/`，服务端只发数据包。

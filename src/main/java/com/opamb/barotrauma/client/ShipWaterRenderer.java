@@ -16,7 +16,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
+import com.opamb.barotrauma.registry.ModParticles;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -66,6 +69,36 @@ import java.util.Locale;
 @Mod.EventBusSubscriber(modid = BarotraumaMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class ShipWaterRenderer {
 
+    /**
+     * 水面专用 RenderType：QUADS + NO_CULL + 半透明，但**不写深度**。
+     *
+     * <p>原版 {@code debugQuads()} 会写深度，水面后面的气泡/粒子会被整片挡掉；
+     * 这里只写颜色，水后的粒子仍能透过来。</p>
+     */
+    private static final class WaterRenderType extends RenderStateShard {
+
+        private WaterRenderType() {
+            super("barotrauma_water_quads", () -> {
+            }, () -> {
+            });
+        }
+
+        private static final RenderType TYPE = RenderType.create(
+                "barotrauma_water_quads",
+                DefaultVertexFormat.POSITION_COLOR,
+                VertexFormat.Mode.QUADS,
+                256,
+                false,
+                true,
+                RenderType.CompositeState.builder()
+                        .setShaderState(new ShaderStateShard(GameRenderer::getPositionColorShader))
+                        .setTransparencyState(TRANSLUCENT_TRANSPARENCY)
+                        .setCullState(NO_CULL)
+                        .setDepthTestState(LEQUAL_DEPTH_TEST)
+                        .setWriteMaskState(new WriteMaskStateShard(true, false))
+                        .createCompositeState(false));
+    }
+
     /** 初始值：系统属性 / 环境变量（默认关闭）。游戏内 F9 可随时切换。 */
     private static final boolean DEBUG_DEFAULT = readDebugDefault();
     /**
@@ -90,8 +123,13 @@ public final class ShipWaterRenderer {
     private static final boolean FIX_MAIN_WATER = !"false".equalsIgnoreCase(
             System.getProperty("barotrauma.waterFix", "true"));
 
-    /** 空气海域方案：不再绘制任何水体，只保留水面包用于“船舱是否干燥”的判断。 */
-    private static final boolean RENDER_WATER = false;
+    /**
+     * 舱内水体绘制开关。空气海域仍然不生成真实水方块；这里画的是客户端自绘水面，
+     * 数据来自 {@link ShipWaterStatePacket}。默认开启，可用 -Dbarotrauma.renderWater=false 关闭
+     * （排查“数据没到”还是“渲染没画”时用）。
+     */
+    private static final boolean RENDER_WATER = !"false".equalsIgnoreCase(
+            System.getProperty("barotrauma.renderWater", "true"));
 
     private static volatile boolean debug = DEBUG_DEFAULT;
     private static volatile ShipWaterStatePacket state = ShipWaterStatePacket.empty();
@@ -107,6 +145,17 @@ public final class ShipWaterRenderer {
     private static long lastMatrixTick = -100L;
     private static long frameSequence;
     private static boolean missingShipLogged;
+    /** 客户端平滑后的水面高度；服务端每 10 tick 才同步一次，直接画会一跳一跳。 */
+    private static float[] smoothedBoxes = new float[0];
+    private static long smoothedShipId = Long.MIN_VALUE;
+    private static boolean smoothedPhysical;
+    private static long lastFrameNanos;
+    private static double waveSeconds;
+    private static long lastBreachParticleNanos;
+    /** 满水舱气泡减半发送用。 */
+    private static boolean fullBubbleToggle;
+    /** 破口很多时轮转起点：每次从下一个洞开始发粒子，避免总是前几个洞喷。 */
+    private static int breachRoundRobin;
 
     private ShipWaterRenderer() {
     }
@@ -125,8 +174,9 @@ public final class ShipWaterRenderer {
     public static void accept(ShipWaterStatePacket packet) {
         state = packet;
         if (++packetCount % 40L == 0L) {
-            BarotraumaMod.LOGGER.info("[water] 收到水面包：physical={} ship={} boxes={} anchor=({},{},{})",
+            BarotraumaMod.LOGGER.info("[water] 收到水面包：physical={} ship={} boxes={} breaches={} anchor=({},{},{})",
                     packet.physical(), packet.shipId(), packet.boxes().length / 7,
+                    packet.breaches().length / 8,
                     packet.anchorX(), packet.anchorY(), packet.anchorZ());
         }
     }
@@ -264,26 +314,40 @@ public final class ShipWaterRenderer {
         lastDeltaY = dy;
         lastDeltaZ = dz;
         lastShipFound = true;
+        // 船下沉/移动时，舱内气泡要跟着水一起走，否则会留在原地显得“往上跑”。
+        if (ship != null) {
+            Vector3dc velocity = ship.getVelocity();
+            ShipBubbleParticle.setShipCarry(velocity.x(), velocity.y(), velocity.z());
+        } else {
+            ShipBubbleParticle.setShipCarry(0.0D, 0.0D, 0.0D);
+        }
 
-        // 空气海域：不再画水体。保留下面的旧渲染代码只是为了保留诊断/回退参考，
-        // 正常路径在这里直接返回。
+        // 空气海域不生成真实水方块；舱内水面由下面的客户端自绘路径负责。
+        // 需要临时关闭时用 -Dbarotrauma.renderWater=false。
         if (!RENDER_WATER) {
             return;
         }
 
+        // 服务端 10 Hz 同步一次水面，这里插值到每一帧；波浪相位也按真实时间走，
+        // 不再跟 20 TPS 的 gameTime 绑定，避免水面一跳一跳。
+        float dt = frameDeltaSeconds();
+        float[] boxes = smoothWater(data, dt);
+        float seconds = (float) waveSeconds;
+
         // 原有的 1Hz 运行日志保持不变（不是新的详细诊断）。
         if (level.getGameTime() - lastDebugTick >= 20L) {
             lastDebugTick = level.getGameTime();
-            BarotraumaMod.LOGGER.info("[water] 画水面：ship={} physical={} boxes={} delta=({},{},{}) firstSurface={}",
-                    data.shipId(), data.physical(), data.boxes().length / 7, dx, dy, dz,
+            BarotraumaMod.LOGGER.info("[water] 画水面：ship={} physical={} boxes={} breaches={} delta=({},{},{}) firstSurface={}",
+                    data.shipId(), data.physical(), data.boxes().length / 7, data.breaches().length / 8,
+                    dx, dy, dz,
                     data.boxes().length >= 7 ? data.boxes()[6] + dy : Float.NaN);
         }
 
         // ---- 独立修复补丁：相机相对坐标 + debugQuads（NO_CULL）----
         // 第 0 步的 drawWaterLegacy 保留，可用 -Dbarotrauma.waterFix=false 回退。
         WaterStats water = FIX_MAIN_WATER
-                ? drawWaterFixed(event, mc, data, dx, dy, dz, ship, cameraPos)
-                : drawWaterLegacy(event, mc, data, dx, dy, dz, ship != null);
+                ? drawWaterFixed(event, mc.level, data, boxes, seconds, dx, dy, dz, ship, cameraPos)
+                : drawWaterLegacy(event, mc, data, boxes, seconds, dx, dy, dz, ship != null);
 
         // ---- 诊断显示：独立 buffer，绝不污染主水路径的 flush ----
         MarkerStats markers = null;
@@ -333,9 +397,10 @@ public final class ShipWaterRenderer {
      * 这个方法是"第 0 步只加诊断"的基准，修复补丁会单独替换它。
      */
     private static WaterStats drawWaterLegacy(RenderLevelStageEvent event, Minecraft mc,
-                                              ShipWaterStatePacket data,
-                                              float dx, float dy, float dz, boolean shipFound) {
-        if (data.boxes().length < 7) {
+                                              ShipWaterStatePacket data, float[] boxes,
+                                              float seconds, float dx, float dy, float dz,
+                                              boolean shipFound) {
+        if (boxes.length < 7) {
             return new WaterStats(0, 0, 0);
         }
         if (data.physical() && !shipFound) {
@@ -353,21 +418,20 @@ public final class ShipWaterRenderer {
 
         int quads = 0;
         int boxesDrawn = 0;
-        for (int i = 0; i + 6 < data.boxes().length; i += 7) {
-            float minX = data.boxes()[i] + dx;
-            float minY = data.boxes()[i + 1] + dy;
-            float minZ = data.boxes()[i + 2] + dz;
-            float maxX = data.boxes()[i + 3] + 1.0F + dx;
-            float maxY = data.boxes()[i + 4] + 1.0F + dy;
-            float maxZ = data.boxes()[i + 5] + 1.0F + dz;
-            float surface = data.boxes()[i + 6] + dy;
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            float minX = boxes[i] + dx;
+            float minY = boxes[i + 1] + dy;
+            float minZ = boxes[i + 2] + dz;
+            float maxX = boxes[i + 3] + 1.0F + dx;
+            float maxY = boxes[i + 4] + 1.0F + dy;
+            float maxZ = boxes[i + 5] + 1.0F + dz;
+            float surface = boxes[i + 6] + dy;
             if (surface <= minY + 0.01F) {
                 continue;
             }
             if (surface > maxY) {
                 surface = maxY;
             }
-            float seconds = (mc.level.getGameTime() % 200000L) / 20.0F;
             int nx = Math.max(1, Math.min(32, (int) Math.ceil(maxX - minX)));
             int nz = Math.max(1, Math.min(32, (int) Math.ceil(maxZ - minZ)));
             float stepX = (maxX - minX) / nx;
@@ -418,11 +482,11 @@ public final class ShipWaterRenderer {
      * 展开后等价于 {@code R*(v − anchor) + renderPos − camera}：绕装配锚点旋转、平移到当前
      * render 位置、再减相机。没有把 shipToWorld 再乘进 PoseStack，所以不会双重旋转。</p>
      */
-    private static WaterStats drawWaterFixed(RenderLevelStageEvent event, Minecraft mc,
-                                             ShipWaterStatePacket data,
-                                             float dx, float dy, float dz,
+    private static WaterStats drawWaterFixed(RenderLevelStageEvent event, ClientLevel level,
+                                             ShipWaterStatePacket data, float[] boxes,
+                                             float seconds, float dx, float dy, float dz,
                                              ClientShip ship, Vec3 cameraPos) {
-        if (data.boxes().length < 7) {
+        if (boxes.length < 7) {
             return new WaterStats(0, 0, 0);
         }
         Matrix4d toCamera;
@@ -443,7 +507,7 @@ public final class ShipWaterRenderer {
         // 否则 endBatch(debugQuads) 可能把别人的 pending 顶点一起画掉。
         BufferBuilder waterBuilder = new BufferBuilder(4096);
         MultiBufferSource.BufferSource buffers = MultiBufferSource.immediate(waterBuilder);
-        RenderType type = RenderType.debugQuads();
+        RenderType type = WaterRenderType.TYPE;
         VertexConsumer vc = buffers.getBuffer(type);
         float r = 0.05F;
         float g = 0.28F;
@@ -452,55 +516,98 @@ public final class ShipWaterRenderer {
 
         int quads = 0;
         int boxesDrawn = 0;
-        for (int i = 0; i + 6 < data.boxes().length; i += 7) {
-            float minX = data.boxes()[i];
-            float minY = data.boxes()[i + 1];
-            float minZ = data.boxes()[i + 2];
-            float maxX = data.boxes()[i + 3] + 1.0F;
-            float maxY = data.boxes()[i + 4] + 1.0F;
-            float maxZ = data.boxes()[i + 5] + 1.0F;
-            float surface = data.boxes()[i + 6];
+        // 同一水体的棱柱按水面高度分组：面遮挡判断只在自己这组里找邻居，
+        // 避免大船几十个棱柱时每帧做全量两两比较。
+        it.unimi.dsi.fastutil.floats.Float2ObjectOpenHashMap<it.unimi.dsi.fastutil.ints.IntArrayList> bySurface =
+                new it.unimi.dsi.fastutil.floats.Float2ObjectOpenHashMap<>();
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            if (boxes[i + 6] <= boxes[i + 1] + 0.01F) {
+                continue;
+            }
+            bySurface.computeIfAbsent(boxes[i + 6], key -> new it.unimi.dsi.fastutil.ints.IntArrayList())
+                    .add(i);
+        }
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            float minX = boxes[i];
+            float minY = boxes[i + 1];
+            float minZ = boxes[i + 2];
+            float maxX = boxes[i + 3] + 1.0F;
+            float maxY = boxes[i + 4] + 1.0F;
+            float maxZ = boxes[i + 5] + 1.0F;
+            float surface = boxes[i + 6];
             if (surface <= minY + 0.01F) {
                 continue;
             }
-            if (surface > maxY) {
-                surface = maxY;
-            }
-            float seconds = (mc.level.getGameTime() % 200000L) / 20.0F;
+            // 一个舱室可能拆成多个棱柱。只有"水面落在自己这一层"的棱柱才画顶面；
+            // 完全没在水下的棱柱（surface > maxY）顶面是水体内部，不画，否则会双倍混色。
+            boolean reachesSurface = surface <= maxY + 0.01F;
+            float waterTop = Math.min(surface, maxY);
             int nx = Math.max(1, Math.min(32, (int) Math.ceil(maxX - minX)));
             int nz = Math.max(1, Math.min(32, (int) Math.ceil(maxZ - minZ)));
             float stepX = (maxX - minX) / nx;
             float stepZ = (maxZ - minZ) / nz;
-            for (int ix = 0; ix < nx; ix++) {
-                for (int iz = 0; iz < nz; iz++) {
-                    float xa = minX + ix * stepX;
-                    float xb = xa + stepX;
-                    float za = minZ + iz * stepZ;
-                    float zb = za + stepZ;
-                    float ha = wave(seconds, xa, za);
-                    float hb = wave(seconds, xa, zb);
-                    float hc = wave(seconds, xb, zb);
-                    float hd = wave(seconds, xb, za);
-                    float slope = (hb + hc - ha - hd) * 6.0F;
-                    float shade = Math.max(0.45F, Math.min(1.35F, 1.0F + slope));
-                    waveQuadXf(vc, m, toCamera, r * shade, g * shade, b * shade, a,
-                            xa, surface + ha, za, xa, surface + hb, zb,
-                            xb, surface + hc, zb, xb, surface + hd, za);
-                    quads++;
+            if (reachesSurface) {
+                for (int ix = 0; ix < nx; ix++) {
+                    for (int iz = 0; iz < nz; iz++) {
+                        float xa = minX + ix * stepX;
+                        float xb = xa + stepX;
+                        float za = minZ + iz * stepZ;
+                        float zb = za + stepZ;
+                        float ha = wave(seconds, xa, za);
+                        float hb = wave(seconds, xa, zb);
+                        float hc = wave(seconds, xb, zb);
+                        float hd = wave(seconds, xb, za);
+                        float slope = (hb + hc - ha - hd) * 6.0F;
+                        float shade = Math.max(0.45F, Math.min(1.35F, 1.0F + slope));
+                        waveQuadXf(vc, m, toCamera, r * shade, g * shade, b * shade, a,
+                                xa, waterTop + ha, za, xa, waterTop + hb, zb,
+                                xb, waterTop + hc, zb, xb, waterTop + hd, za);
+                        quads++;
+                    }
                 }
             }
-            quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
-                    minX, minY, minZ, maxX, minY, minZ, maxX, minY, maxZ, minX, minY, maxZ);
-            quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
-                    minX, minY, minZ, minX, surface, minZ, maxX, surface, minZ, maxX, minY, minZ);
-            quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
-                    minX, minY, maxZ, maxX, minY, maxZ, maxX, surface, maxZ, minX, surface, maxZ);
-            quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
-                    minX, minY, minZ, minX, minY, maxZ, minX, surface, maxZ, minX, surface, minZ);
-            quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
-                    maxX, minY, minZ, maxX, surface, minZ, maxX, surface, maxZ, maxX, minY, maxZ);
-            quads += 5;
+            // 底面：正下方已经有同一水体的棱柱时是内部面，不画。
+            if (!faceCovered(boxes, i, Face.BOTTOM, bySurface.get(boxes[i + 6]))) {
+                quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
+                        minX, minY, minZ, maxX, minY, minZ, maxX, minY, maxZ, minX, minY, maxZ);
+                quads++;
+            }
+            // 四个侧面：相邻棱柱已经有水盖住这一面时跳过，避免内部面双倍混色。
+            if (!faceCovered(boxes, i, Face.NORTH, bySurface.get(boxes[i + 6]))) {
+                quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
+                        minX, minY, minZ, minX, waterTop, minZ, maxX, waterTop, minZ, maxX, minY, minZ);
+                quads++;
+            }
+            if (!faceCovered(boxes, i, Face.SOUTH, bySurface.get(boxes[i + 6]))) {
+                quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
+                        minX, minY, maxZ, maxX, minY, maxZ, maxX, waterTop, maxZ, minX, waterTop, maxZ);
+                quads++;
+            }
+            if (!faceCovered(boxes, i, Face.WEST, bySurface.get(boxes[i + 6]))) {
+                quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
+                        minX, minY, minZ, minX, minY, maxZ, minX, waterTop, maxZ, minX, waterTop, minZ);
+                quads++;
+            }
+            if (!faceCovered(boxes, i, Face.EAST, bySurface.get(boxes[i + 6]))) {
+                quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
+                        maxX, minY, minZ, maxX, waterTop, minZ, maxX, waterTop, maxZ, maxX, minY, maxZ);
+                quads++;
+            }
             boxesDrawn++;
+        }
+        // 破口视觉：空气侧只在涨水时喷水花；水下气泡在灌满后仍然持续冒出。
+        if (data.breaches().length >= 8) {
+            float carryX = 0.0F;
+            float carryY = 0.0F;
+            float carryZ = 0.0F;
+            if (ship != null) {
+                Vector3dc velocity = ship.getVelocity();
+                carryX = (float) (velocity.x() / 20.0D);
+                carryY = (float) (velocity.y() / 20.0D);
+                carryZ = (float) (velocity.z() / 20.0D);
+            }
+            spawnBreachWater(level, toCamera, cameraPos, data.breaches(), data.boxes(), boxes,
+                    carryX, carryY, carryZ);
         }
         if (quads > 0) {
             // 不再手动 disableCull/depthMask：debugQuads 的 state shard 已明确是
@@ -555,6 +662,209 @@ public final class ShipWaterRenderer {
         waterVertex(vc, pose, toCamera, x2, y2, z2, r, g, b, a);
         waterVertex(vc, pose, toCamera, x3, y3, z3, r, g, b, a);
         waterVertex(vc, pose, toCamera, x4, y4, z4, r, g, b, a);
+    }
+
+    // ------------------------------------------------------------------ 破口进水视觉
+
+    /**
+     * 破口进水视觉，按破口与水面的关系分两种：
+     *
+     * <ul>
+     *   <li><b>破口在水面以上（舱内还是空气）</b>：水柱喷进空气会碎成水花/水雾，
+     *       用原版 {@code SPLASH} + {@code CLOUD} 从洞口朝舱内、向下喷；</li>
+     *   <li><b>破口在水面以下（舱室已经灌满/半灌满）</b>：水从洞口挤出气泡，
+     *       用放大版 {@link ShipBubbleParticle} 上浮。</li>
+     * </ul>
+     *
+     * <p>两种都只在“水面还在涨”时生成；每次总量有上限，避免破口很多时粒子爆量。</p>
+     */
+    private static void spawnBreachWater(ClientLevel level, Matrix4d toCamera, Vec3 cameraPos,
+                                         float[] breaches, float[] target, float[] boxes,
+                                         float carryX, float carryY, float carryZ) {
+        if (level == null || breaches.length < 8) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (now - lastBreachParticleNanos < 100_000_000L) {
+            return;
+        }
+        lastBreachParticleNanos = now;
+        // 破口很多时（整片船壳被炸开）必须限流：每 100ms 总共 72 个粒子，
+        // 气泡另有存活上限。否则 80+ 个洞 × 长寿命气泡会堆到几万个，直接把内存吃光。
+        int holeCount = breaches.length / 8;
+        if (holeCount <= 0) {
+            return;
+        }
+        int budget = 72;
+        int start = Math.floorMod(breachRoundRobin++, holeCount);
+        for (int n = 0; n < holeCount && budget > 0; n++) {
+            int i = Math.floorMod(start + n, holeCount) * 8;
+            float bx = breaches[i];
+            float by = breaches[i + 1];
+            float bz = breaches[i + 2];
+            // 服务端直接告诉我们这个破口属于 boxes 里的哪一个空腔，避免 bbox 重叠时认错。
+            int box = Math.round(breaches[i + 3]) * 7;
+            if (box < 0 || box + 6 >= boxes.length || box + 6 >= target.length) {
+                continue;
+            }
+            // 空腔的完整上下界（不是单个棱柱的），用来判断顶部破口/是否灌满。
+            float ownerMinY = breaches[i + 6];
+            float ownerMaxY = breaches[i + 7];
+            // 空气侧只在“这个舱的水面还在涨”时喷水花；破口在水下时，即使舱室已经灌满、
+            // 水面不再上涨，也要持续冒气泡（这正是原版“满水房间从破口冒泡”的效果）。
+            float rise = target[box + 6] - boxes[box + 6];
+            float surface = boxes[box + 6];
+            boolean airSide = by > surface + 0.1F;
+            if (airSide && rise <= 0.0005F) {
+                continue;
+            }
+            // 水下气泡给一个最低强度，灌满后不会因为 rise=0 直接消失。
+            float intensity = Math.min(1.0F, Math.max(0.20F, rise * 300.0F));
+            // 服务端算好的“朝密封舱室质心”的方向；为 0 时退回空腔 bbox 中心。
+            float dirX = breaches[i + 4];
+            float dirZ = breaches[i + 5];
+            if (dirX == 0.0F && dirZ == 0.0F) {
+                float centerX = (boxes[box] + boxes[box + 3] + 1.0F) * 0.5F;
+                float centerZ = (boxes[box + 2] + boxes[box + 5] + 1.0F) * 0.5F;
+                dirX = centerX - bx;
+                dirZ = centerZ - bz;
+                float length = (float) Math.sqrt(dirX * dirX + dirZ * dirZ);
+                if (length > 1.0E-4F) {
+                    dirX /= length;
+                    dirZ /= length;
+                } else {
+                    dirX = 0.0F;
+                    dirZ = 0.0F;
+                }
+            }
+            WATER_SCRATCH.set(bx, by, bz);
+            toCamera.transformPosition(WATER_SCRATCH);
+            double wx = cameraPos.x + WATER_SCRATCH.x;
+            double wy = cameraPos.y + WATER_SCRATCH.y;
+            double wz = cameraPos.z + WATER_SCRATCH.z;
+            float worldSurface = (float) (wy + (surface - by));
+            // 进水方向 = 洞口朝舱内的水平方向；粒子主轴沿它，再加一个垂直方向的散射锥。
+            float perpX = -dirZ;
+            float perpZ = dirX;
+            if (airSide) {
+                // 空气侧：白色烟雾沿进水方向喷进舱内，向下落，带小角度散射。
+                int perHole = 1 + (int) (intensity * 2.0F);
+                for (int c = 0; c < perHole && budget-- > 0; c++) {
+                    double side = (level.random.nextDouble() - 0.5D) * 0.16D;
+                    double forward = 0.22D + level.random.nextDouble() * 0.16D;
+                    level.addParticle(ParticleTypes.CLOUD,
+                            wx + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            wy + (level.random.nextDouble() - 0.5D) * 0.24D,
+                            wz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            carryX + dirX * forward + perpX * side
+                                    + (level.random.nextDouble() - 0.5D) * 0.04D,
+                            carryY - 0.10D - level.random.nextDouble() * 0.14D,
+                            carryZ + dirZ * forward + perpZ * side
+                                    + (level.random.nextDouble() - 0.5D) * 0.04D);
+                }
+            } else {
+                if (ShipBubbleParticle.liveCount() >= 260) {
+                    continue;
+                }
+                // 水下：气泡朝舱内。满水舱降低密度；顶部破口用较大的向下初速度压进船里。
+                boolean full = surface >= ownerMaxY + 1.0F - 0.01F;
+                if (full) {
+                    fullBubbleToggle = !fullBubbleToggle;
+                    if (!fullBubbleToggle) {
+                        continue;
+                    }
+                }
+                boolean highBreach = by > (ownerMinY + ownerMaxY) * 0.5F + 0.5F;
+                ShipBubbleParticle.setPendingSurface(worldSurface);
+                ShipBubbleParticle.setPendingSink(highBreach);
+                int perHole = full ? 1 : 1 + (int) (intensity * 2.0F);
+                for (int c = 0; c < perHole && budget-- > 0; c++) {
+                    double side = (level.random.nextDouble() - 0.5D) * 0.14D;
+                    double forward = 0.18D + level.random.nextDouble() * 0.14D;
+                    double vy = highBreach
+                            ? -0.80D - level.random.nextDouble() * 0.40D
+                            : 0.18D + level.random.nextDouble() * 0.28D;
+                    level.addParticle(ModParticles.SHIP_BUBBLE.get(),
+                            wx + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            wy + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            wz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            dirX * forward + perpX * side
+                                    + (level.random.nextDouble() - 0.5D) * 0.03D,
+                            vy,
+                            dirZ * forward + perpZ * side
+                                    + (level.random.nextDouble() - 0.5D) * 0.03D);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ 帧率平滑
+
+    /**
+     * 帧间隔（秒），同时推进波浪相位。
+     *
+     * <p>上限 0.1s：切窗口/卡顿后不要一帧跨过很长一段波浪；水面平滑也用它，
+     * 保证 10 Hz 的网络数据在 60/144/240 Hz 下都是连续上升。</p>
+     */
+    private static float frameDeltaSeconds() {
+        long now = System.nanoTime();
+        float dt = lastFrameNanos == 0L
+                ? 1.0F / 60.0F
+                : (now - lastFrameNanos) / 1_000_000_000.0F;
+        lastFrameNanos = now;
+        dt = Math.max(0.0F, Math.min(0.1F, dt));
+        waveSeconds += dt;
+        return dt;
+    }
+
+    /**
+     * 把服务端 2 Hz 的水面高度插值到每一帧。
+     *
+     * <p>只改客户端显示；{@link #isInsideDryZone} 仍然使用原始 packet，干湿/氧气判定
+     * 不受视觉平滑影响。bbox 变了说明重扫过，直接对齐，不做跨舱动画。</p>
+     */
+    private static float[] smoothWater(ShipWaterStatePacket data, float dt) {
+        float[] source = data.boxes();
+        if (source.length < 7) {
+            smoothedBoxes = source;
+            smoothedShipId = data.shipId();
+            smoothedPhysical = data.physical();
+            return source;
+        }
+        if (smoothedBoxes.length != source.length
+                || smoothedShipId != data.shipId()
+                || smoothedPhysical != data.physical()) {
+            smoothedBoxes = source.clone();
+            smoothedShipId = data.shipId();
+            smoothedPhysical = data.physical();
+            return smoothedBoxes;
+        }
+        // 指数趋近：时间常数约 100ms，和 10 Hz 的同步步长对齐，水面连续而不是台阶。
+        float alpha = 1.0F - (float) Math.exp(-dt * 10.0F);
+        for (int i = 0; i + 6 < smoothedBoxes.length; i += 7) {
+            boolean sameBox = smoothedBoxes[i] == source[i]
+                    && smoothedBoxes[i + 1] == source[i + 1]
+                    && smoothedBoxes[i + 2] == source[i + 2]
+                    && smoothedBoxes[i + 3] == source[i + 3]
+                    && smoothedBoxes[i + 4] == source[i + 4]
+                    && smoothedBoxes[i + 5] == source[i + 5];
+            smoothedBoxes[i] = source[i];
+            smoothedBoxes[i + 1] = source[i + 1];
+            smoothedBoxes[i + 2] = source[i + 2];
+            smoothedBoxes[i + 3] = source[i + 3];
+            smoothedBoxes[i + 4] = source[i + 4];
+            smoothedBoxes[i + 5] = source[i + 5];
+            float target = source[i + 6];
+            float current = smoothedBoxes[i + 6];
+            if (!sameBox || Math.abs(target - current) > 4.0F) {
+                // 重扫/瞬移：直接对齐，避免水面慢慢爬过一大段。
+                current = target;
+            } else {
+                current += (target - current) * alpha;
+            }
+            smoothedBoxes[i + 6] = current;
+        }
+        return smoothedBoxes;
     }
 
     // ------------------------------------------------------------------ 诊断显示
@@ -901,6 +1211,78 @@ public final class ShipWaterRenderer {
     }
 
     // ------------------------------------------------------------------ 几何辅助
+
+    private enum Face {
+        BOTTOM, NORTH, SOUTH, WEST, EAST
+    }
+
+    /**
+     * 这个面是否被同一水体的相邻棱柱盖住（水体内部面）。
+     *
+     * <p>水面被拆成多个棱柱后，相邻棱柱会各画一次贴在一起的面，半透明会叠成深色条；
+     * 这里提前判断并跳过。只有"同一水面高度 + 真的有水 + 完全盖住这一面"的邻居才算。</p>
+     */
+    private static boolean faceCovered(float[] boxes, int index, Face face,
+                                       it.unimi.dsi.fastutil.ints.IntArrayList group) {
+        if (group == null) {
+            return false;
+        }
+        float iMinX = boxes[index];
+        float iMinY = boxes[index + 1];
+        float iMinZ = boxes[index + 2];
+        float iMaxX = boxes[index + 3] + 1.0F;
+        float iMaxY = boxes[index + 4] + 1.0F;
+        float iMaxZ = boxes[index + 5] + 1.0F;
+        float iSurface = boxes[index + 6];
+        float iWaterTop = Math.min(iSurface, iMaxY);
+        for (int k = 0; k < group.size(); k++) {
+            int j = group.getInt(k);
+            if (j == index) {
+                continue;
+            }
+            float jMinX = boxes[j];
+            float jMinY = boxes[j + 1];
+            float jMinZ = boxes[j + 2];
+            float jMaxX = boxes[j + 3] + 1.0F;
+            float jMaxY = boxes[j + 4] + 1.0F;
+            float jMaxZ = boxes[j + 5] + 1.0F;
+            // 邻居自己必须在这一层真的有水；水面上方那截干燥棱柱不算。
+            if (jMinY >= iSurface) {
+                continue;
+            }
+            float jWaterTop = Math.min(iSurface, jMaxY);
+            boolean covered = switch (face) {
+                case BOTTOM -> Math.abs(jMaxY - iMinY) < 1.0E-3F
+                        && jMinY <= iMinY + 1.0E-3F
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX)
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ);
+                case NORTH -> Math.abs(jMaxZ - iMinZ) < 1.0E-3F
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX)
+                        && jMinY <= iMinY + 1.0E-3F
+                        && jWaterTop >= iWaterTop - 1.0E-3F;
+                case SOUTH -> Math.abs(jMinZ - iMaxZ) < 1.0E-3F
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX)
+                        && jMinY <= iMinY + 1.0E-3F
+                        && jWaterTop >= iWaterTop - 1.0E-3F;
+                case WEST -> Math.abs(jMaxX - iMinX) < 1.0E-3F
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ)
+                        && jMinY <= iMinY + 1.0E-3F
+                        && jWaterTop >= iWaterTop - 1.0E-3F;
+                case EAST -> Math.abs(jMinX - iMaxX) < 1.0E-3F
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ)
+                        && jMinY <= iMinY + 1.0E-3F
+                        && jWaterTop >= iWaterTop - 1.0E-3F;
+            };
+            if (covered) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean overlap(float aMin, float aMax, float bMin, float bMax) {
+        return Math.max(aMin, bMin) < Math.min(aMax, bMax) - 1.0E-3F;
+    }
 
     /** 波高：两组正弦叠加，幅度约 5~8 cm，不足以穿模，但视觉上有流动感。 */
     private static float wave(float seconds, float x, float z) {

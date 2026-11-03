@@ -85,7 +85,7 @@ public record MyPacket(int value) {
 
 ### 3. 干湿判定
 
-不要在业务代码里直接读 `FluidState` 判断水下。统一调用 `OceanEnvironment.isSubmerged(level, pos)`；船内干燥区由 `VsPilot`（服务端）和 `ShipWaterRenderer`（客户端）注册到 `OceanEnvironment.setDryZone()`。
+不要在业务代码里直接读 `FluidState` 判断水下。统一调用 `OceanEnvironment.isSubmerged(level, pos)`；船内干燥区按 side 分开注册：服务端由 `VsPilot` 调 `OceanEnvironment.setServerDryZone()`，客户端由 `ClientSetup` 把 `ShipWaterRenderer::isInsideDryZone` 注册到 `OceanEnvironment.setClientDryZone()`。单人存档客户端与服务端同 JVM，只留一份静态注册会被覆盖。
 
 ### 4. 物理船状态访问
 

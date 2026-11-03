@@ -450,7 +450,9 @@ public final class VsPilot {
                 }
                 refreshHull(level);
             }
-            if (state != null && ++waterSyncTimer % 10 == 0) {
+            // 和模拟步进（每 2 tick，10 Hz）对齐：水面目标每 100 ms 更新一次，
+            // 客户端再按帧插值。原来是 10 tick（2 Hz），水面会一顿一顿。
+            if (state != null && ++waterSyncTimer % 2 == 0) {
                 sendWaterState(state);
             }
             // 自动驾驶：物理船没有方块形态的 tickMovement 了，这里按目标点算推力再推给刚体
@@ -750,6 +752,8 @@ public final class VsPilot {
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
                 pos -> ModShipBlocks.isShipBlock(level.getBlockState(pos.offset(ox, oy, oz))), probe);
         current.replaceGeometry(geometry);
+        // 记录连海破口位置：客户端据此在洞口画水束/气泡。内部隔墙的洞会被过滤掉。
+        current.addBreaches(broken);
         // 洞越大进水越快：被砸掉的格数 = 初始船体数 - 当前快照数
         current.simulation().setBreachSize(Math.max(1, initialShipBlocks - snapshot.size()));
         // 用"旧的舱内格 + 新的密闭舱室"合并，而不是直接取新 openPockets：

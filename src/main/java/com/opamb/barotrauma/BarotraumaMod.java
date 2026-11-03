@@ -8,6 +8,7 @@ import com.opamb.barotrauma.registry.ModCreativeTabs;
 import com.opamb.barotrauma.registry.ModEntities;
 import com.opamb.barotrauma.registry.ModItems;
 import com.opamb.barotrauma.registry.ModMenus;
+import com.opamb.barotrauma.registry.ModParticles;
 import com.opamb.barotrauma.registry.ModShipBlocks;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.common.Mod;
@@ -44,6 +45,7 @@ public final class BarotraumaMod {
         ModBlockEntities.register(modBus);
         ModMenus.register(modBus);
         ModEntities.register(modBus);
+        ModParticles.register(modBus);
         com.opamb.barotrauma.network.ModNetwork.register();
 
         LOGGER.info("[Barotrauma] loaded, 该上潜了。");

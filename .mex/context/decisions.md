@@ -69,7 +69,7 @@ relations:
 **Decision:** `DeepSeaChunkGenerator` / `OutpostBuilder` / `TrunkNetwork` 生成空气海域；水下观感由客户端雾/滤镜和 `UnderwaterSurvival` 表现；船内进水继续用每舱标量水位。
 **Reasoning:** 真实水会触发 VS2 实体区块碰撞异常，物理船装配后海水还会灌进船体；空气海域让船体、哨站和舱室保持真正的空气环境。
 **Alternatives considered:** 继续用真实水并加装 `hull_plug` 堵水（放弃，异常仍会出现在其它位置，且堵水方块维护成本高）。
-**Consequences:** `ShipWaterRenderer` 设置 `RENDER_WATER = false`，水面包只用于干湿判断；`hull_plug` 方块/类/资源已删除；旧存档里已生成的真实水区块不会自动转换。
+**Consequences:** 空气海域不生成真实水方块；舱内水面由 `ShipWaterRenderer` 客户端自绘（10 Hz packet + 逐帧插值，默认开启，`-Dbarotrauma.renderWater=false` 可关），破口坐标随包发送、客户端按破口与水面关系画水花/气泡，水面包同时用于干湿判断；`hull_plug` 方块/类/资源已删除；旧存档里已生成的真实水区块不会自动转换。
 
 <!-- mex:entity
 id: mx_01M6FTV6Y842Y7SVSJB6P8WDMX
@@ -107,7 +107,7 @@ relations:
 **Decision:** 每个舱室维护一个 `ShipSimulation` 水量标量；破口从 `openPockets` 缓慢灌水，`ShipWater` 只在需要时把水位铺成真实水方块。
 **Reasoning:** 逐格流体模拟在 Minecraft 里性能和确定性都不可控，且 VS2 船上写流体会引发区块异常；标量模型足够表达“进水/抽水/压载”的玩法。
 **Alternatives considered:** 原版流体 + 船体体积拦截（部分保留在 `ShipVolumeGuard`，但不再是主路径）；逐格自定义流体（放弃，复杂度过高）。
-**Consequences:** 水面视觉只能是 bbox + surface 近似；非矩形舱室不精确；客户端水面渲染目前已关闭。
+**Consequences:** 水面视觉按舱室真实格子拆成矩形棱柱，隔离舱不会被旁边连海空腔的包围盒盖住；客户端水面渲染默认开启（10 Hz packet + 逐帧插值）。
 
 <!-- mex:entity
 id: mx_01M6FTV6PJ74EP6JX37ERQV7DF

@@ -1,10 +1,14 @@
 package com.opamb.barotrauma.ship;
 
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 一艘船的运行时状态：几何（舱室）+ 机器统计 + 数值模拟。
@@ -13,6 +17,15 @@ public final class ShipState {
 
     private ShipGeometry.Result geometry;
     private final MachineCount machines;
+    /** 一个破口：位置 + 朝船体内部（密封舱室质心）的水平单位方向。 */
+    public record Breach(BlockPos pos, float dirX, float dirZ) {
+    }
+
+    /**
+     * 破口（装配/世界坐标）。只记录真正连到外海的洞，客户端在洞口画水流/气泡；
+     * 内部隔墙被砸出的洞不算，避免在舱室中间凭空冒泡。
+     */
+    private final Map<BlockPos, Breach> breaches = new LinkedHashMap<>();
     private ShipSimulation simulation;
     private ShipWater water;
     private int throttleX;
@@ -69,6 +82,67 @@ public final class ShipState {
             simulation = new ShipSimulation(geometry, machines);
         }
         return simulation;
+    }
+
+    /** 连到外海的破口；随水包发给客户端，用来在洞口画水花/气泡。 */
+    public Collection<Breach> breaches() {
+        return breaches.values();
+    }
+
+    /**
+     * 记录新破口。只有落在连海空腔（{@code openPockets}）里的洞才会真正进水，
+     * 内部隔墙的洞不记录，避免客户端在舱室中间画错位置。
+     *
+     * <p>方向取“洞口 → 密封舱室质心”的水平单位向量：客户端用它把水花/气泡朝舱内推，
+     * 不再靠 bbox 中心猜（连海空腔的 bbox 会包含船外空气，容易指向舱外）。</p>
+     */
+    public void addBreaches(Collection<BlockPos> positions) {
+        if (positions == null || positions.isEmpty()) {
+            return;
+        }
+        double[] center = interiorCenter();
+        for (BlockPos pos : positions) {
+            if (!isSeaConnected(pos) || breaches.containsKey(pos)) {
+                continue;
+            }
+            double dx = center[0] - (pos.getX() + 0.5D);
+            double dz = center[1] - (pos.getZ() + 0.5D);
+            double length = Math.sqrt(dx * dx + dz * dz);
+            float dirX = length > 1.0E-4D ? (float) (dx / length) : 0.0F;
+            float dirZ = length > 1.0E-4D ? (float) (dz / length) : 0.0F;
+            BlockPos immutable = pos.immutable();
+            breaches.put(immutable, new Breach(immutable, dirX, dirZ));
+        }
+    }
+
+    /** 密封舱室在水平面上的质心；没有密封舱室时退回整船包围盒中心。 */
+    private double[] interiorCenter() {
+        double x = 0.0D;
+        double z = 0.0D;
+        long count = 0L;
+        for (ShipGeometry.Compartment compartment : geometry.compartments()) {
+            for (BlockPos pos : compartment.cells()) {
+                x += pos.getX() + 0.5D;
+                z += pos.getZ() + 0.5D;
+                count++;
+            }
+        }
+        if (count == 0L) {
+            ShipGeometry.Bounds bounds = geometry.bounds();
+            x = (bounds.minX() + bounds.maxX() + 1) * 0.5D;
+            z = (bounds.minZ() + bounds.maxZ() + 1) * 0.5D;
+            count = 1L;
+        }
+        return new double[]{x / count, z / count};
+    }
+
+    private boolean isSeaConnected(BlockPos pos) {
+        for (ShipGeometry.Compartment pocket : geometry.openPockets()) {
+            if (pocket.cells().contains(pos)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 船体是否还完整（有方块被破坏 → 需要重新分舱）。 */

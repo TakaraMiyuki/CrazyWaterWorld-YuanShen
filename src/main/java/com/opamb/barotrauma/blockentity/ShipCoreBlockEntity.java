@@ -13,6 +13,9 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * 船核心方块实体：持有船体扫描结果。
  *
@@ -83,8 +86,9 @@ public class ShipCoreBlockEntity extends BlockEntity {
                         be.state.geometry().openPockets().size(),
                         Math.round(be.state.simulation().pocketWaterTotal()));
             }
-            // 方块船也要把水面状态发给客户端（物理船走 VsPilot 的同步）
-            if (now % 10L == 0L && now != be.lastWaterSyncGameTime) {
+            // 方块船也要把水面状态发给客户端（物理船走 VsPilot 的同步）。
+            // 和模拟步进一样每 2 tick（10 Hz）发一次，客户端插值才不会看到台阶。
+            if (now % 2L == 0L && now != be.lastWaterSyncGameTime) {
                 be.lastWaterSyncGameTime = now;
                 com.opamb.barotrauma.network.ModNetwork.sendToAll(
                         com.opamb.barotrauma.ship.ShipWaterStateBuilder.build(
@@ -108,6 +112,17 @@ public class ShipCoreBlockEntity extends BlockEntity {
             if (active != null) {
                 this.state = active;
                 return active;
+            }
+        }
+        // 先记下旧船体里已经消失的格子：新几何扫完后它们不再是 hull，
+        // 但客户端需要这些坐标在洞口画水束/气泡。
+        List<BlockPos> broken = new ArrayList<>();
+        ShipState previous = this.state;
+        if (previous != null) {
+            for (BlockPos pos : previous.geometry().hull()) {
+                if (!ModShipBlocks.isShipBlock(level.getBlockState(pos))) {
+                    broken.add(pos);
+                }
             }
         }
         BlockPos corePos = worldPosition;
@@ -143,6 +158,15 @@ public class ShipCoreBlockEntity extends BlockEntity {
 
         // 机器方块已全部删除，MachineCount 里只有声纳还有意义（保持信号接口不变）
         state = new ShipState(geometry, new MachineCount(0, 0, 0, 0, 0, 0, sonar));
+        // 旧破口要带过来：新扫描的 hull 已经不包含它们，只靠 broken 会丢掉之前的洞。
+        if (previous != null) {
+            List<BlockPos> oldBreaches = new ArrayList<>(previous.breaches().size());
+            for (ShipState.Breach breach : previous.breaches()) {
+                oldBreaches.add(breach.pos());
+            }
+            state.addBreaches(oldBreaches);
+        }
+        state.addBreaches(broken);
         return state;
     }
 

@@ -49,11 +49,11 @@ public final class ShipSimulation {
     /**
      * 外界进水速率：每个破口空腔每秒进水（格³/秒），随深度略增。
      *
-     * <p>2 格³/秒对一间 270 格的舱室要两分多钟，玩家只会以为"没进水"。
-     * 按《潜渊症》Gap 的手感（几百单位/秒、几秒灌满一间舱）放大到 20，
-     * 一间 270 格的舱约 13 秒灌满。以后按真实破口面积算时可以再精调。</p>
+     * <p>2 格³/秒对一间 270 格的舱室要两分多钟，玩家只会以为"没进水"；
+     * 20 又太快（一艘船十几秒就沉底）。先从 6 起步：一间 270 格的舱约 45 秒灌满，
+     * 给玩家堵漏/排水的时间。以后按真实破口面积算时可以再精调。</p>
      */
-    private static final double SEA_INFLOW_PER_SECOND = 20.0D;
+    private static final double SEA_INFLOW_PER_SECOND = 6.0D;
 
     private double temperature = 3000.0D;
     private double fission = 0.5D;

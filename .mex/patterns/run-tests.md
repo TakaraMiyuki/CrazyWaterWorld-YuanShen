@@ -1,6 +1,6 @@
 ---
 name: run-tests
-description: Build and run the three verification layers (JUnit, GameTest, server smoke) on Windows with the project's JDK and proxy setup.
+description: Build and run the three verification layers (JUnit, GameTest, server smoke) on Windows with the project's JDK setup.
 triggers:
   - "run tests"
   - "build failed"
@@ -70,7 +70,7 @@ mex:
 - L2 的模板必须放在 `run/gameteststructures/`，放 `src/main/resources` 不会被 1.20.1 GameTest 找到。
 - `runServer` 首次会生成 `run/eula.txt`，需要改成 `eula=true`。
 - 客户端工作目录是 `run-client/`，与服务端的 `run/` 分开；删存档时不要只删一个。
-- 代理失效时先注释 `gradle.properties` 的 5 行 proxy 配置，或确认 `127.0.0.1:7899` 在运行。
+- 代理属于本机环境：仓库的 `gradle.properties` 不写 proxy；需要时在用户级 `~/.gradle/gradle.properties`（或命令行）配置。本机当前端口是 `127.0.0.1:7897`，换机器不要照抄。
 
 ## Verify
 
@@ -81,4 +81,4 @@ mex:
 
 ## Debug
 
-构建失败先看 `JAVA_HOME` 和代理；依赖 404/超时看 `settings.gradle` 的 BMCLAPI/阿里云仓库顺序；GameTest 找不到结构看 `run/gameteststructures`；世界地形不对先删 `run/world`。
+构建失败先看 `JAVA_HOME`；依赖 404/超时先看代理/镜像配置，再核对 `settings.gradle` 的 BMCLAPI/阿里云仓库顺序；GameTest 找不到结构看 `run/gameteststructures`；世界地形不对先删 `run/world`。

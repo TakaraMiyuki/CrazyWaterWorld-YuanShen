@@ -52,8 +52,14 @@ class ShipWaterStateBuilderTest {
 
     private static float surfaceOf(ShipState state) {
         ShipWaterStatePacket packet = ShipWaterStateBuilder.build(state, 1L, false, 0.0F, 0.0F, 0.0F);
-        assertEquals(7, packet.boxes().length, "一个舱室应该正好 7 个 float");
-        return packet.boxes()[6];
+        float[] boxes = packet.boxes();
+        assertTrue(boxes.length >= 7 && boxes.length % 7 == 0,
+                "boxes 必须是若干个 7 float 的水体块");
+        float surface = boxes[6];
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            assertEquals(surface, boxes[i + 6], 1.0E-4F, "同一舱室拆出的所有棱柱水面必须一致");
+        }
+        return surface;
     }
 
     @Test
@@ -116,12 +122,42 @@ class ShipWaterStateBuilderTest {
     @DisplayName("连海空腔走 pocketWater 分支，同样按逐层格数算")
     void openPocket_usesPocketWaterAndPerLayerFill() {
         ShipState state = new ShipState(result(lShape(), true), MachineCount.EMPTY);
-        // 0.1 秒 × 20 格³/秒 × 深度系数 1.0 = 2 格 = 200 单位。
+        // 0.1 秒 × 6 格³/秒 × 深度系数 1.0 = 0.6 格 = 60 单位。
         state.simulation().tickSeaFlood(0.1D, 0.0D);
 
         float surface = surfaceOf(state);
         assertTrue(surface > 0.0F && surface < 2.0F, "部分进水应该产生中间水面");
-        // 2 格水：底层 3 格先铺，2/3 层 -> 0.6667。
-        assertEquals(2.0F / 3.0F, surface, 1.0E-4F);
+        // 0.6 格水：底层 3 格先铺，0.6/3 层 -> 0.2。
+        assertEquals(1.0F / 5.0F, surface, 1.0E-4F);
+    }
+
+    @Test
+    @DisplayName("连海空腔的棱柱不会盖住 bbox 里的密闭小间")
+    void openPocketPrisms_doNotCoverSealedRoomInsideBoundingBox() {
+        // 8 格连海空腔围着一个 1 格密闭舱：旧 bbox 实现会把那一格也画上水面。
+        Set<BlockPos> pocketCells = Set.of(
+                new BlockPos(0, 0, 0), new BlockPos(1, 0, 0), new BlockPos(2, 0, 0),
+                new BlockPos(0, 0, 1), new BlockPos(2, 0, 1),
+                new BlockPos(0, 0, 2), new BlockPos(1, 0, 2), new BlockPos(2, 0, 2)
+        );
+        ShipGeometry.Compartment pocket = new ShipGeometry.Compartment(pocketCells, 0);
+        ShipGeometry.Compartment sealed =
+                new ShipGeometry.Compartment(Set.of(new BlockPos(1, 0, 1)), 0);
+        ShipGeometry.Bounds bounds = new ShipGeometry.Bounds(0, 0, 0, 2, 0, 2);
+        ShipGeometry.Result geometry = new ShipGeometry.Result(
+                List.of(sealed), List.of(pocket), 0, 9, bounds, Set.of());
+        ShipState state = new ShipState(geometry, MachineCount.EMPTY);
+        state.simulation().tickSeaFlood(0.1D, 0.0D);
+
+        ShipWaterStatePacket packet = ShipWaterStateBuilder.build(state, 1L, false, 0.0F, 0.0F, 0.0F);
+        float[] boxes = packet.boxes();
+        // 密闭舱在前（1 块），连海空腔的棱柱从第 2 块开始。
+        for (int i = 7; i + 6 < boxes.length; i += 7) {
+            boolean coversSealedCell = 1 >= boxes[i] && 1 <= boxes[i + 3]
+                    && 0 >= boxes[i + 1] && 0 <= boxes[i + 4]
+                    && 1 >= boxes[i + 2] && 1 <= boxes[i + 5];
+            assertTrue(!coversSealedCell,
+                    "连海空腔的棱柱不能覆盖密闭舱那一格 (1,0,1)");
+        }
     }
 }

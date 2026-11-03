@@ -81,4 +81,4 @@ mex:
 **Forge/Maven 下载超时或 `zip END header not found`：** 确认 `settings.gradle` 和 `build.gradle` 的 BMCLAPI 仓库在最前面；必要时删掉损坏的缓存文件重下。
 **`run/world` 里还是旧地形：** 世界生成器改动不会回填已生成区块；删除 `run/world` 后重新创建世界。
 **VS2 未安装或类加载崩溃：** 确认模组只在 `ship/vs/` 引用 VS2 类型，`VsSupport.available()` 为 false 时走非物理船路径。
-**客户端看不到船内水面：** 当前 `ShipWaterRenderer.RENDER_WATER = false`，水面绘制被有意关闭；水面包只用于 `OceanEnvironment` 的干湿判定，不是渲染故障。
+**客户端看不到船内水面：** 先确认没有加 `-Dbarotrauma.renderWater=false`；默认会绘制舱内水面（客户端自绘，10 Hz packet + 逐帧插值）。船确实是干的（`surface == minY`）时不会画。

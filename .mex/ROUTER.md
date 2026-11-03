@@ -36,19 +36,19 @@ Then read this file fully before doing anything else in this session.
 **Working:**
 - 1.20.1 Forge mod builds and loads; air-ocean deep dimension, outposts, and starter submarine generate.
 - VS2 physical ships: launch, dock, thruster control, breach reconciliation, sonar proxy, and water-state sync.
-- Per-compartment scalar water simulation, ballast, pumps, reactor, and `/barotrauma ship flood` diagnostics.
+- Per-compartment scalar water simulation, breach inflow splash/bubbles, ballast, pumps, reactor, and `/barotrauma ship flood` diagnostics.
 - Sonar screen/hologram, depth HUD, underwater fog, movement drag, and oxygen/drowning survival.
 - L1 26 unit tests and 3 GameTests passed before the latest fetch; L3 `.smoketest-vs` passed earlier.
 
 **Not yet built:**
 - Physical-ship persistence and world-load adoption (`VsPilot` is reset on server lifecycle).
 - Multi-ship support (one `VsPilot` singleton manages one physical ship).
-- Per-cell water surface geometry (bbox + surface approximation only).
+- Per-block water surface geometry (compartments are sent as greedy rectangular prisms; no per-cell fluid surface).
 - Migration of old saves containing real water or removed `hull_plug` blocks.
 
 **Known issues:**
 - The current MEX code graph indexes only the 3 files under `tools/`; Java sources are not in the graph. Use Grep/Read for Java.
-- `ShipWaterRenderer.RENDER_WATER = false`; missing ship-interior water is intentional, not a render bug.
+- `ShipWaterRenderer` draws compartment water client-side by default (10 Hz packet + per-frame interpolation); the air ocean still has no real water blocks. Disable with `-Dbarotrauma.renderWater=false` when isolating data vs render issues.
 - The existing `run/world` predates the air-ocean change; L3 `.smoketest-vs` currently stops with “找不到 9×9×9 空气空腔” until `run/world` is deleted and regenerated.
 - `docs/IMPLEMENTATION.md` still describes the older water-column world; prefer the code and `.mex/context/architecture.md` when they conflict.
 
