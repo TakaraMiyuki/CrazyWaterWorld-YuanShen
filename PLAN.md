@@ -2526,3 +2526,50 @@ run/.smoketest-vs + runServer --offline → BUILD SUCCESSFUL
 世界 23 没有再出现“初始潜艇已收成物理船，跳过重建”。世界 22 在 21:08:19 有一次
 “客户端找不到船 id=4”，但世界 23 同流程未复现；这是客户端 VS2 船同步的独立问题，
 不是跨世界静态状态泄漏，后续若再出现单独查。
+
+## 10.55 空气海域手感与 GUI 修复（2026-11-03）
+
+用户连续实测反馈，逐条定位并修复：
+
+1. **方块船舱内仍有水下滤镜**。
+   根因不是坐标，是干燥区注册被覆盖：单人存档的客户端和集成服务端在同一个 JVM，
+   `ClientSetup` 先注册 `ShipWaterRenderer::isInsideDryZone`，服务器启动加载 `VsPilot` 时
+   又用 `OceanEnvironment.setDryZone(VsPilot::isInsideDryZone)` 覆盖了同一份静态字段；
+   方块船还没装成刚体，`VsPilot` 判定不了舱内，滤镜就漏进舱里。
+   修复：`OceanEnvironment` 拆成 `clientDryZone` / `serverDryZone`，按 `level.isClientSide()` 选；
+   `ClientSetup` 用 `setClientDryZone`，`VsPilot` 静态块用 `setServerDryZone`。
+
+2. **方块船不会进水**。
+   `ShipWaterRenderer.isInsideDryZone` 原先对初始潜艇固定内腔无条件返回干燥，
+   绕过了水面包里的水面高度。修复：固定内腔只负责范围判断，水面高度仍取覆盖初始潜艇的
+   盒子；破壳后水面淹到眼睛 → 舱内进滤镜、服务端开始掉氧。
+   `OceanEnvironment.isInsideBlockShipDryZone` 同样改为以水面包水面为准，只有没有盒子时才兜底干燥。
+   另外方块船破壳现在会打 `[ship] 方块船船体破损，已重扫：舱室 …｜连海 …｜连海水 …`。
+
+3. **站在干燥区往水里看没有滤镜**。
+   原先雾/色调只看相机是否浸没。现在 `UnderwaterEffects` 增加视线采样：
+   相机在干燥区时沿视线逐格找第一个“水”采样点，玻璃（`canOcclude()==false`）可穿过，
+   船壳/岩层直接截断；找到后从该距离开始铺水下雾，室内保持清晰、窗外仍是蓝绿色。
+   屏幕色调仍只在相机真正浸没时叠加。
+
+4. **打开 GUI 后滤镜和浮力失效、直接下沉**。
+   `UnderwaterMovement` 原先 `mc.screen != null` 直接 return，原版重力接管 → 玩家沉底；
+   `UnderwaterEffects.onRenderGui` 同样在 GUI 打开时跳过色调。
+   修复：GUI 打开时仍保持悬浮（垂直速度归 0，不受按键影响）；色调不再因 GUI 跳过。
+   Forge `GameRenderer.render` 里 `gui.render`（`RenderGuiEvent.Pre`）在 `drawScreen` 之前，
+   所以色调画在 GUI 底下，不会盖住界面。
+
+5. **舱内跳跃顶点滤镜闪烁**。
+   初始潜艇干燥区上界从 `-68` 改为 `-67.5`：舱内跳跃时眼睛最高约 `-68.1`，
+   屋顶表面在 `-67`，用 `-67.5` 既能覆盖跳跃、又不会把贴着屋顶游泳的人误判成干燥。
+   通用盒测试对“干燥舱室”也放宽一格顶格，进水舱室仍以水面为准。
+
+验证：
+
+```
+./gradlew test --offline   → 26 PASSED（2026-11-03 13:11）
+客户端实测（run-client/logs/latest.log）：
+  方块船舱内 submerged=false，破壳进水后翻 true；
+  打开 GUI 后不再下沉；物理船破口后 12 秒从 y=-69.5 沉到 y=-117.5。
+用户确认：“修好了”（GUI 悬浮/滤镜）、“可以”（进水/看水）。
+```
