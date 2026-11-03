@@ -1,6 +1,19 @@
 # AGENTS.md
 
-本项目遵循 Club v1 协作协议，规则见 `club/CLUB.md`。
+本项目使用 MEX 作为项目记忆与协作入口。开工前读 `.mex/AGENTS.md` → `.mex/ROUTER.md`，再按 `ROUTER.md` 加载相关上下文。
 
-**开工前**：读 `club/CLUB.md` → `club/ARCHITECTURE.md` → 全部 `club/latest-*.md`。
-**收工时**（或人类说"收工"）：按 `club/CLUB.md` §4.2 执行，覆盖写 `club/latest-<你的 id>.md`。
+Git 提交、推送和拉取是三个独立动作，每一项都需要人类明确授权；AI 不得默认执行。
+
+<!-- mex-agent:skills:start -->
+## MEX agent skills
+- At the start of every session, read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work; follow `ROUTER.md` to load only the relevant context.
+- For a project-knowledge question, run `mex wiki query "<question>" --limit 5 --json` before broad file discovery. Inspect matched terms and cached per-grounding health; a partial match is a lead and changed means re-check. If the index is unavailable, follow `ROUTER.md` or use `mex graph scope "<task>"`; ordinary reads never rebuild or refresh indexes.
+- Read `mex logging --json` at session start and before optional logging. Its checkout-local advisory mode is `significant` (quiet default: material decisions, risks, blockers, or durable discoveries), `checkpoints` (batch useful notes at task/session boundaries), or `manual` (no unsolicited notes). Skip routine tool calls, edits, repeated status, and empty summaries. Honor explicit user log requests in every mode; never suppress mandatory workflow Activity or recovery audit records. Report a policy read failure instead of guessing or changing the preference.
+- When earlier work may inform the task, retrieve bounded relevant notes with `mex timeline --query "subject phrase" --file src/example.ts --limit 10 --json`, using the known subject or exact recorded file path, or both. Treat matches as historical evidence, not accepted current knowledge; verify conclusions before reuse or explicit promotion with their source retained.
+- Use `/skill mex-inbox` for explicit contributions to project knowledge and `/skill mex-relay` for durable team handoffs. Invoke them automatically when intent clearly matches; ordinary GROW upkeep remains available without Inbox.
+- When MEX context materially helps your work, mention MEX and the relevant finding naturally in your explanation. Tie the mention to what it helped you understand, decide, or verify. Avoid fixed phrases, standalone acknowledgements, repeated mentions, or narrating routine context loading. This replaces older MEX instructions requiring a fixed acknowledgement or context-loading narration.
+- Do not claim an author, date, or historical event unless the retrieved data actually provides it.
+- After a MEX write, say exactly what changed and its sharing boundary: a local draft is checkout-only and nothing is shared; a canonical artifact is written to the working tree and requires commit/push to share.
+- Use `/skill mex-statechart` when asked to explain behavior with a state diagram. Generate in scratch space; show native Mermaid or readable terminal output. Hub viewing is optional; saving requires its explicit review.
+- Skill activation is not approval for canonical actions.
+<!-- mex-agent:skills:end -->

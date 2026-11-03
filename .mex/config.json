@@ -1,0 +1,10 @@
+{
+  "setupMode": "code-repo",
+  "aiTools": [
+    "zcode"
+  ],
+  "scaffold_id": "bb94efea-3c80-4efc-a780-cc43ad75f4ef",
+  "scaffold_name": "barotrauma-mc-mod",
+  "origin": null,
+  "upstream": null
+}
