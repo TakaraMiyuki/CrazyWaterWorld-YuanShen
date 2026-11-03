@@ -61,6 +61,8 @@ mex:
 - `ShipWater.applyWater()` 仍能给非物理船铺真实水方块；空气海域下不要用它来“验证”水面。
 - 水面只按真实格子的矩形棱柱绘制；如果隔离舱还在涨水，先看服务端 `[vs] 船体破损：… → 重扫 N 个舱室 / M 处连海`：M 处连海各自独立，隔离舱应该算在“N 个舱室”里且水量为 0。
 - “隔墙顶上留孔”属于同一个连海空腔：孔在水面以上时另一侧必须干燥；如果一破口两侧同步涨水，检查 `ShipPocketWater` 的破口 source 是否传进了 `ShipWaterStateBuilder`（破口位置必须落在 openPockets 格子里）。
+- **现在船壳有逐格耐久**：左键/爆炸只扣耐久；耐久 ≤90% 就开始小漏、≤30% 大漏，0% 时方块切成 `breached`（保留方块数据、无碰撞、不可见），几何扫描把它当空气，才进入连海空腔灌水。砸了几下没进水不是水系统坏了，先看 `HullDamage` 的剩余比例；详见 `patterns/debug-hull-damage.md`。
+- 物理船的船壳方块在世界里是空气，不能用 `level.getBlockState(worldPos)` 判断破口/耐久；物理船走 `snapshot` + `VsPilot.breakSnapshotBlock`，耐久包 `ShipHullDamagePacket` 的坐标空间和 `ShipWaterStatePacket` 相同。
 
 ## Verify
 

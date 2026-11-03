@@ -37,13 +37,17 @@ Then read this file fully before doing anything else in this session.
 - 1.20.1 Forge mod builds and loads; air-ocean deep dimension, outposts, and starter submarine generate.
 - VS2 physical ships: launch, dock, thruster control, breach reconciliation, sonar proxy, and water-state sync.
 - Per-compartment scalar water simulation, breach inflow splash/bubbles, ballast, pumps, reactor, and `/barotrauma ship flood` diagnostics.
+- Per-block hull durability (plating 200 / glass 100), melee + explosion + block-ship collision damage, welding-tool repair, red→green world bars, crosshair percentage readout, and `ShipHullDamagePacket` sync.
 - Sonar screen/hologram, depth HUD, underwater fog, movement drag, and oxygen/drowning survival.
-- L1 26 unit tests and 3 GameTests passed before the latest fetch; L3 `.smoketest-vs` passed earlier.
+- L1 unit tests (including `HullDamageTest`, `ShipPocketWaterTest`, `ShipWaterStateBuilderTest`) pass; 3 GameTests and L3 `.smoketest-vs` passed earlier.
 
 **Not yet built:**
 - Physical-ship persistence and world-load adoption (`VsPilot` is reset on server lifecycle).
 - Multi-ship support (one `VsPilot` singleton manages one physical ship).
 - Per-block water surface geometry (compartments are sent as greedy rectangular prisms; no per-cell fluid surface).
+- Physical-ship collision → hull damage (VS2 2.4.11 collision event is not wired; only player melee, explosions, and block-ship collisions damage hulls).
+- Tier/upgrade system for `hullHealthMultiplier` (official `increasewallhealth` is +20%/level, capped by T1/T2/T3 at 2/4/6 levels).
+- Hull-durability persistence across world save or VS2 dismantle/relaunch.
 - Migration of old saves containing real water or removed `hull_plug` blocks.
 
 **Known issues:**
@@ -51,6 +55,8 @@ Then read this file fully before doing anything else in this session.
 - `ShipWaterRenderer` draws compartment water client-side by default (10 Hz packet + per-frame interpolation); the air ocean still has no real water blocks. Disable with `-Dbarotrauma.renderWater=false` when isolating data vs render issues.
 - The existing `run/world` predates the air-ocean change; L3 `.smoketest-vs` currently stops with “找不到 9×9×9 空气空腔” until `run/world` is deleted and regenerated.
 - `docs/IMPLEMENTATION.md` still describes the older water-column world; prefer the code and `.mex/context/architecture.md` when they conflict.
+- Hull damage is runtime-only and is not included in any save format; don’t promise persistent repair progress yet.
+- The hull damage bar is a world-space billboard (not a block texture); if it is missing, load `patterns/debug-hull-damage.md` before touching the water renderer.
 
 ## Routing Table
 
