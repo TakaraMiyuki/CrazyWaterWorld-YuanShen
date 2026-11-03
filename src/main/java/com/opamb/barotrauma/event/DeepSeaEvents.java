@@ -168,19 +168,40 @@ public final class DeepSeaEvents {
                                 .then(Commands.argument("units", DoubleArgumentType.doubleArg(0.0D, 100000.0D))
                                         .executes(ctx -> {
                                             ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                            ServerLevel level = player.serverLevel();
+                                            ShipState ship;
+                                            boolean physical = false;
                                             BlockEntity found = findShipCore(player);
-                                            if (!(found instanceof ShipCoreBlockEntity core)) {
-                                                ctx.getSource().sendFailure(Component.literal("附近 16 格内没有船核心"));
+                                            if (found instanceof ShipCoreBlockEntity core) {
+                                                ship = ensureState(core, level);
+                                            } else if (VsSupport.available() && VsPilot.hasShip()) {
+                                                // 物理船的声纳方块在 VS2 船坞里，世界坐标下找不到核心；
+                                                // 直接给装配时那份船状态加水，只更新模拟水量。
+                                                ship = VsPilot.state();
+                                                physical = ship != null;
+                                            } else {
+                                                ctx.getSource().sendFailure(
+                                                        Component.literal("附近 16 格内没有船核心，也没有物理船"));
                                                 return 0;
                                             }
-                                            ShipState ship = ensureState(core, player.serverLevel());
+                                            if (ship == null) {
+                                                ctx.getSource().sendFailure(Component.literal("没有可用的船状态"));
+                                                return 0;
+                                            }
                                             double units = DoubleArgumentType.getDouble(ctx, "units");
                                             ship.simulation().flood(0, units);
-                                            int changed = ship.applyWater(player.serverLevel());
-                                            player.sendSystemMessage(Component.literal(String.format(Locale.ROOT,
-                                                            "向 1 号舱注入 %d 单位水，写入 %d 格水方块",
-                                                            Math.round(units), changed))
-                                                    .withStyle(ChatFormatting.AQUA));
+                                            if (physical) {
+                                                player.sendSystemMessage(Component.literal(String.format(Locale.ROOT,
+                                                                "向物理船 1 号舱注入 %d 单位水（只更新模拟水量，不写世界水方块）",
+                                                                Math.round(units)))
+                                                        .withStyle(ChatFormatting.AQUA));
+                                            } else {
+                                                int changed = ship.applyWater(level);
+                                                player.sendSystemMessage(Component.literal(String.format(Locale.ROOT,
+                                                                "向 1 号舱注入 %d 单位水，写入 %d 格水方块",
+                                                                Math.round(units), changed))
+                                                        .withStyle(ChatFormatting.AQUA));
+                                            }
                                             return 1;
                                         })))
                         .then(Commands.literal("throttle")
