@@ -37,7 +37,8 @@ public record ShipHullDamagePacket(long shipId, boolean physical,
     public static ShipHullDamagePacket build(ShipState state, long shipId, boolean physical,
                                              float anchorX, float anchorY, float anchorZ) {
         List<Map.Entry<BlockPos, Float>> damaged = state.hullDamage().sortedEntries();
-        damaged.removeIf(entry -> entry.getValue() >= 0.9999F);
+        // NaN 一旦发到客户端，血条三个区间比较全落空，画出来就是一条黑框黑槽。
+        damaged.removeIf(entry -> entry.getValue() >= 0.9999F || !Float.isFinite(entry.getValue()));
         if (damaged.size() > MAX_ENTRIES) {
             // 破口很多时优先同步最严重的格子，条数不会把包撑爆。
             damaged.sort((a, b) -> Float.compare(a.getValue(), b.getValue()));

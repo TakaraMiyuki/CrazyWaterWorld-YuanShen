@@ -60,10 +60,15 @@ public final class HullDamage {
      * @param maxHealth 该方块的最大血量（已乘船的加固倍率）
      */
     public float applyDamage(BlockPos pos, float amount, float maxHealth) {
-        if (pos == null || amount <= 0.0F || maxHealth <= 0.0F) {
+        if (pos == null || amount <= 0.0F || maxHealth <= 0.0F
+                || !Float.isFinite(amount) || !Float.isFinite(maxHealth)) {
             return health(pos);
         }
         float next = health(pos) - amount / maxHealth;
+        if (!Float.isFinite(next)) {
+            // NaN/Infinity 一旦进表，客户端三个区间比较全落空，会画出"黑条"。
+            return health(pos);
+        }
         if (next <= EPSILON) {
             // 0% 不删记录：方块会切成 breached 状态继续存在，耐久条和焊接都需要它。
             health.put(pos.immutable(), 0.0F);
@@ -93,9 +98,9 @@ public final class HullDamage {
         return next;
     }
 
-    /** 直接写入剩余比例（迁移/自检用）。0..1 之外会被夹紧。 */
+    /** 直接写入剩余比例（迁移/自检用）。0..1 之外会被夹紧；非有限值直接丢弃。 */
     public void setHealth(BlockPos pos, float value) {
-        if (pos == null) {
+        if (pos == null || !Float.isFinite(value)) {
             return;
         }
         float clamped = Math.max(0.0F, Math.min(1.0F, value));

@@ -13,7 +13,7 @@ edges:
   - target: patterns/vs2-physical-ship.md
     condition: when the ship is a VS2 physical ship
 grounds_to: []
-last_updated: 2026-11-03
+last_updated: 2026-11-04
 mex:
   id: mx_01M6FTV7HFY90PQMFBX26T2438
   type: pattern
@@ -62,6 +62,9 @@ mex:
 - 水面只按真实格子的矩形棱柱绘制；如果隔离舱还在涨水，先看服务端 `[vs] 船体破损：… → 重扫 N 个舱室 / M 处连海`：M 处连海各自独立，隔离舱应该算在“N 个舱室”里且水量为 0。
 - “隔墙顶上留孔”属于同一个连海空腔：孔在水面以上时另一侧必须干燥；如果一破口两侧同步涨水，检查 `ShipPocketWater` 的破口 source 是否传进了 `ShipWaterStateBuilder`（破口位置必须落在 openPockets 格子里）。
 - **现在船壳有逐格耐久**：左键/爆炸只扣耐久；耐久 ≤90% 就开始小漏、≤30% 大漏，0% 时方块切成 `breached`（保留方块数据、无碰撞、不可见），几何扫描把它当空气，才进入连海空腔灌水。砸了几下没进水不是水系统坏了，先看 `HullDamage` 的剩余比例；详见 `patterns/debug-hull-damage.md`。
+- **2026-11-04 水面渲染现状（未解决）**：顶面高度改为"角点取周围四格水位平均 + 同相位波浪"，相邻 quad 共享角点数值相同；相邻水柱之间的竖直台阶面已删除；贴墙面只沿法线缩 1cm、沿墙方向占满；明暗用空间+时间连续函数。用户实测**仍能看到缝/分界线**。已试且无效的方案：平水面（用户否决，要波浪）、波浪接缝对齐、台阶面保留/删除、贴墙面 XZ 双缩/单缩、角点平均。下一步应开 `-Dbarotrauma.waterDebug=true` 在**真实进水场景**（组装物理船 + 破口）抓 `[water-diag]` 完整日志（箱体、矩阵、深度对照标记），先确认缝是不是 quad 边界，再怀疑深度精度/船体渲染交互，不要继续盲改几何。
+- **没有水包时水面渲染根本不跑**：新世界/船未组装时 `[water] 画水面` 每行都是 `ship=-1 boxes=0`，此时室内被水下滤镜染色（干燥区判定没有数据），看起来像"水渲染坏了"。先看日志的 boxes 数量再判断。
+- **诊断日志**：`[water] 画水面`（1 Hz，boxes/breaches/delta）、`[water] 水盒快照`（每艘船第一包，前 12 盒坐标/水面 + 不同水面值数量）、`[hull-bar]`（每格血条首次渲染的原始数值）。
 - 物理船的船壳方块在世界里是空气，不能用 `level.getBlockState(worldPos)` 判断破口/耐久；物理船走 `snapshot` + `VsPilot.breakSnapshotBlock`，耐久包 `ShipHullDamagePacket` 的坐标空间和 `ShipWaterStatePacket` 相同。
 
 ## Verify

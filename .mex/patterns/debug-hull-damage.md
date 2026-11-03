@@ -12,7 +12,7 @@ edges:
     condition: when a block finally breaks and you need to verify breach inflow
   - target: patterns/vs2-physical-ship.md
     condition: when the ship is a VS2 physical ship
-last_updated: 2026-11-03
+last_updated: 2026-11-04
 ---
 
 # Debug Hull Damage
@@ -28,8 +28,11 @@ last_updated: 2026-11-03
   - 剩余 ≤90%（伤害 ≥10%）：`ShipState.tickLeaks` 往相邻密封舱注水（210 单位/s，约完整破口 35%）。
   - 剩余 ≤30%（伤害 ≥70%）：大漏（450 单位/s，约 75%）。
   - 剩余 0%：方块切成 `HullBlock.BREACHED=true`——**不删除、不掉落、无碰撞、不可见，但方块数据和 0% 耐久保留**；几何扫描把它当空气，舱室变连海空腔，走 `tickSeaFlood`。焊接回 >0 时恢复实体并重扫封口。
-- 网络：`ShipHullDamagePacket`，每格 4 个值（x/y/z + 剩余比例），10 Hz + 受击/焊接立即发。物理船坐标空间和 `ShipWaterStatePacket` 一致（装配原坐标 + anchor）。
-- 客户端：`HullDamageRenderer` 在方块朝相机的一面画红→绿条（`AFTER_PARTICLES`），`HullDamageOverlay` 在准星下方显示“船壳 62%”。
+- 网络：`ShipHullDamagePacket`，每格 5 个值（x/y/z + 剩余比例 + 泄漏强度），10 Hz + 受击/焊接立即发。物理船坐标空间和 `ShipWaterStatePacket` 一致（装配原坐标 + anchor）。
+- 客户端：`HullDamageRenderer` 在 `AFTER_PARTICLES` 画**朝向相机的公告牌大血条**（不是贴面 decal），叠加原版 `destroy_stage_*` 裂痕（六面）和按泄漏强度喷水花；`HullDamageOverlay`/动作栏百分比已删除，只保留这一条。
+  - **黑条根因（2026-11-04 定位）**：贴面 decal 选"朝相机的面"用的是船局部坐标；船沉了几十米后相机在船局部坐标里高出船壳几十格，永远选中方块顶面，侧面看顶面 decal 就是一条压扁的黑缝（health 数值全正常）。公告牌不受影响。
+  - **防嵌墙公式**：外抬量 = `0.6 + hw·|right·n| + hh·|up·n|`，保证牌子靠墙边恒定悬在方块面外 0.1，任何视角都不会被深度测试剪成红丝。条宽 `min(1.4, 0.55 + dist*0.04)`。
+  - 裂痕用 `RenderType.crumbling`，顶点**从方块外看必须逆时针**（默认 CULL）；顺时针会从外面整面被剔，只有钻进方块内部才看得见。
 - 焊接：`WeldingToolItem` 右键持续修，每 0.1 s 修 2.5 点（25 HP/s），每 0.5 s 消耗 1 点燃料，耐久 400。
 
 ## Steps
@@ -61,6 +64,8 @@ last_updated: 2026-11-03
 - 爆炸事件里要把船体格从原版破坏列表移除，否则还是会被秒掉；声纳也要移除（防炸）。
 - 耐久目前只在运行时；世界存档/物理船拆回再装会丢。要做持久化时，随 `ShipState` 一起序列化。
 - 世界条是不写深度的半透明 `RenderType`；如果条被水面/粒子整片盖住，检查 `BarRenderType` 的 `WriteMaskStateShard(true,false)`。
+- 0% 的条是**整条亮红**（0.95/0.12/0.10）；暗红 (0.55,0.04,0.04) 深水下看着就是黑的。部分血量的填充有最小可见宽度（条宽的 12%）。
+- 血条数值异常（黑框黑槽无填充）只可能来自非有限值：`HullDamage.applyDamage/setHealth`、`ShipHullDamagePacket.build`、`HullDamageRenderer.targets` 都有 NaN 防护；每格首次出现血条会打 `[hull-bar] pos=... health=... bits=...`，出问题时先看这行。
 
 ## Verify
 

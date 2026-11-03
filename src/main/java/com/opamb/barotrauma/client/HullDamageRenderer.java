@@ -1,6 +1,5 @@
 package com.opamb.barotrauma.client;
 
-import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -48,8 +47,13 @@ import java.util.List;
  * 方块仍然正常渲染（只是没碰撞），再叠 stage 9 裂痕，所以不会整面墙消失导致透视。
  * 10%/70% 伤害开始按泄漏强度在方块表面喷水花。</p>
  *
+ * <p>所有几何都用 Minecraft 的共享 {@code renderBuffers().bufferSource()}，
+ * **不要每帧 new BufferBuilder**：BufferBuilder 的 native 内存回收不及时，
+ * 破口多/运行久会 OOM（用户实测 384 KB 分配失败）。</p>
+ *
  * <p>物理船的坐标和 {@link ShipWaterRenderer} 完全同源：服务端发装配原坐标 +
- * 装配锚点，客户端用 VS2 的 render 变换映射到世界；方块船直接是世界坐标。</p>
+ * 装配锚点，客户端用 VS2 的 render 变换映射到世界；方块船直接是世界坐标。
+ * 血条/裂痕的“朝相机面”在**船的局部坐标**里算，船旋转后才不会算进方块内部。</p>
  */
 @Mod.EventBusSubscriber(modid = BarotraumaMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class HullDamageRenderer {
@@ -61,6 +65,9 @@ public final class HullDamageRenderer {
     private static final TextureAtlasSprite[] CRACK_SPRITES = new TextureAtlasSprite[10];
 
     private static volatile ShipHullDamagePacket data = ShipHullDamagePacket.empty();
+
+    /** 临时诊断：已经记过日志的方块（packed pos），避免每帧刷屏。 */
+    private static final java.util.Set<Long> LOGGED_BARS = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private HullDamageRenderer() {
     }
@@ -116,6 +123,11 @@ public final class HullDamageRenderer {
             double x = entries[i];
             double y = entries[i + 1];
             double z = entries[i + 2];
+            float health = entries[i + 3];
+            // NaN 会让血条三个区间比较全落空，画成黑框黑槽；直接不画。
+            if (!Float.isFinite(health)) {
+                continue;
+            }
             Vector3d point = new Vector3d(x + 0.5D, y + 0.5D, z + 0.5D);
             toWorld.transformPosition(point);
             Vec3 center = new Vec3(point.x, point.y, point.z);
@@ -124,7 +136,7 @@ public final class HullDamageRenderer {
                 continue;
             }
             out.add(new Target(new BlockPos((int) x, (int) y, (int) z), center,
-                    entries[i + 3], entries[i + 4], distance));
+                    health, entries[i + 4], distance));
         }
         return out;
     }
@@ -156,17 +168,17 @@ public final class HullDamageRenderer {
         PoseStack pose = event.getPoseStack();
         Matrix4f matrix = pose.last().pose();
 
-        drawCracks(matrix, targets, toWorld, cameraPos);
-        drawBars(camera, matrix, targets, cameraPos);
+        drawCracks(mc, matrix, targets, toWorld, cameraPos);
+        drawBars(mc, camera, matrix, targets, cameraPos);
         spawnLeakParticles(level, targets, cameraPos);
     }
 
     // ------------------------------------------------------------------ 裂痕
 
-    private static void drawCracks(Matrix4f matrix, List<Target> targets,
+    private static void drawCracks(Minecraft mc, Matrix4f matrix, List<Target> targets,
                                    Matrix4d toWorld, Vec3 cameraPos) {
-        BufferBuilder builder = new BufferBuilder(65536);
-        MultiBufferSource.BufferSource buffers = MultiBufferSource.immediate(builder);
+        // 共享 buffer：不要再 new BufferBuilder(65536)，否则 native 内存会越积越多。
+        MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
         VertexConsumer vertices = buffers.getBuffer(CRACK_TYPE);
         boolean any = false;
         for (Target target : targets) {
@@ -193,52 +205,55 @@ public final class HullDamageRenderer {
         return sprite;
     }
 
+    /**
+     * 六个面都画。只画“最近面”在方块被相邻方块挡住/斜看时会完全看不到裂痕；
+     * 现在方块模型正常渲染，背面裂痕会被深度测试挡住，六面画不会出现透视，
+     * 但能保证任何朝向都能看到损伤。
+     */
     private static void drawCrackCube(VertexConsumer vertices, Matrix4f matrix, BlockPos pos,
                                       Matrix4d toWorld, Vec3 cameraPos, TextureAtlasSprite sprite) {
-        float u0 = sprite.getU0();
-        float u1 = sprite.getU1();
-        float v0 = sprite.getV0();
-        float v1 = sprite.getV1();
-        // -Z
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0);
-        // +Z
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1);
-        // -X
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1);
-        // +X
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0);
-        // -Y
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0);
-        // +Y
-        crackFace(vertices, matrix, toWorld, cameraPos, pos, u0, u1, v0, v1,
-                0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0);
+        double inflate = 0.003D;
+        double x0 = pos.getX() - inflate;
+        double y0 = pos.getY() - inflate;
+        double z0 = pos.getZ() - inflate;
+        double x1 = pos.getX() + 1.0D + inflate;
+        double y1 = pos.getY() + 1.0D + inflate;
+        double z1 = pos.getZ() + 1.0D + inflate;
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0);
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1);
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1);
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0);
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x0, y0, z0, x0, y0, z1, x1, y0, z1, x1, y0, z0);
+        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
+                x0, y1, z1, x1, y1, z1, x1, y1, z0, x0, y1, z0);
     }
 
     private static void crackFace(VertexConsumer vertices, Matrix4f matrix, Matrix4d toWorld,
-                                  Vec3 cameraPos, BlockPos pos, float u0, float u1, float v0, float v1,
+                                  Vec3 cameraPos, TextureAtlasSprite sprite,
                                   double x0, double y0, double z0,
                                   double x1, double y1, double z1,
                                   double x2, double y2, double z2,
                                   double x3, double y3, double z3) {
-        crackVertex(vertices, matrix, toWorld, cameraPos, pos, x0, y0, z0, u0, v1);
-        crackVertex(vertices, matrix, toWorld, cameraPos, pos, x1, y1, z1, u1, v1);
-        crackVertex(vertices, matrix, toWorld, cameraPos, pos, x2, y2, z2, u1, v0);
-        crackVertex(vertices, matrix, toWorld, cameraPos, pos, x3, y3, z3, u0, v0);
+        float u0 = sprite.getU0();
+        float u1 = sprite.getU1();
+        float v0 = sprite.getV0();
+        float v1 = sprite.getV1();
+        // 必须逆时针（从方块外看）：1.20.1 的 crumbling RenderType 默认开背面剔除，
+        // 顺时针的面从外面看整面被剔掉——之前"只有钻进方块内部才看得见裂痕"就是这个原因。
+        crackVertex(vertices, matrix, toWorld, cameraPos, x3, y3, z3, u0, v0);
+        crackVertex(vertices, matrix, toWorld, cameraPos, x2, y2, z2, u1, v0);
+        crackVertex(vertices, matrix, toWorld, cameraPos, x1, y1, z1, u1, v1);
+        crackVertex(vertices, matrix, toWorld, cameraPos, x0, y0, z0, u0, v1);
     }
 
     private static void crackVertex(VertexConsumer vertices, Matrix4f matrix, Matrix4d toWorld,
-                                    Vec3 cameraPos, BlockPos pos, double dx, double dy, double dz,
-                                    float u, float v) {
-        double inflate = 0.002D;
-        Vector3d world = toWorld.transformPosition(new Vector3d(
-                pos.getX() + dx * (1.0D + inflate * 2.0D) - inflate,
-                pos.getY() + dy * (1.0D + inflate * 2.0D) - inflate,
-                pos.getZ() + dz * (1.0D + inflate * 2.0D) - inflate), new Vector3d());
+                                    Vec3 cameraPos, double x, double y, double z, float u, float v) {
+        Vector3d world = toWorld.transformPosition(new Vector3d(x, y, z), new Vector3d());
         vertices.vertex(matrix,
                         (float) (world.x - cameraPos.x),
                         (float) (world.y - cameraPos.y),
@@ -254,80 +269,120 @@ public final class HullDamageRenderer {
 
     // ------------------------------------------------------------------ 血条
 
-    private static void drawBars(Camera camera, Matrix4f matrix, List<Target> targets, Vec3 cameraPos) {
+    /**
+     * 大血条（回到初版方案）：始终正对相机的公告牌，按距离放大。
+     *
+     * <p>贴面 decal 有一个躲不开的坑：选"朝相机的面"要用船的局部坐标，而船沉了大截之后，
+     * 相机在船局部坐标里高出船壳几十格——按局部坐标选面永远选中方块顶面，从侧面看
+     * 顶面上的条就是一条压扁的黑缝（用户实测"血条黑"，日志里 health 全部正常）。
+     * 公告牌永远正对相机，不存在选面问题。</p>
+     *
+     * <p>初版浮动条的"嵌墙变暗"也修掉了：公告牌沿主导轴往外抬，抬升量 =
+     * 0.12 + 半宽 × |视线与法线夹角余弦|，正好保证贴图面的边无论什么角度都悬在
+     * 舱壁外侧，不会切进相邻方块被深度测试切成暗色残条。</p>
+     */
+    private static void drawBars(Minecraft mc, Camera camera, Matrix4f matrix, List<Target> targets,
+                                 Vec3 cameraPos) {
+        MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
+        VertexConsumer vertices = buffers.getBuffer(BarRenderType.TYPE);
         Vec3 right = new Vec3(camera.getLeftVector()).scale(-1.0D);
         Vec3 up = new Vec3(camera.getUpVector());
-        BufferBuilder builder = new BufferBuilder(8192);
-        MultiBufferSource.BufferSource buffers = MultiBufferSource.immediate(builder);
-        VertexConsumer vertices = buffers.getBuffer(BarRenderType.TYPE);
         for (Target target : targets) {
             if (target.health() >= 0.9999F) {
                 continue;
             }
-            Vec3 towardCamera = cameraPos.subtract(target.center());
-            if (towardCamera.lengthSqr() < 1.0E-6D) {
-                continue;
+            // 排查血条用的临时日志：每格只记一次，能对上玩家报的位置和原始数值。
+            if (LOGGED_BARS.add(target.pos().asLong())) {
+                BarotraumaMod.LOGGER.info("[hull-bar] pos={} health={} bits={} leak={} ship={}",
+                        target.pos().toShortString(), target.health(),
+                        Float.floatToIntBits(target.health()), target.leak(), data.shipId());
             }
-            // 贴在方块朝相机的一面上；条收窄到 0.72，避免转角处被相邻墙切掉一半。
-            Vec3 toward = towardCamera.normalize();
-            double face = 0.5D / Math.max(Math.abs(toward.x),
-                    Math.max(Math.abs(toward.y), Math.abs(toward.z)));
-            // 稍微离墙一点 + 条收窄：转角处不会被相邻方块切掉半条。
-            Vec3 anchor = target.center().add(toward.scale(face + 0.10D));
-            Vec3 relative = anchor.subtract(cameraPos);
-            float health = Mth.clamp(target.health(), 0.0F, 1.0F);
-            quad(vertices, matrix, relative, right, up, 0.62D, 0.16D,
-                    0.0F, 0.0F, 0.0F, 0.78F);
-            if (health <= 0.001F) {
-                quad(vertices, matrix, relative, right, up, 0.56D, 0.12D,
-                        0.30F, 0.03F, 0.03F, 0.90F);
+            Vec3 center = target.center();
+            double dx = cameraPos.x - center.x;
+            double dy = cameraPos.y - center.y;
+            double dz = cameraPos.z - center.z;
+            double ax = Math.abs(dx);
+            double ay = Math.abs(dy);
+            double az = Math.abs(dz);
+            double nx = 0.0D;
+            double ny = 0.0D;
+            double nz = 0.0D;
+            if (ax >= ay && ax >= az) {
+                nx = dx >= 0.0D ? 1.0D : -1.0D;
+            } else if (ay >= az) {
+                ny = dy >= 0.0D ? 1.0D : -1.0D;
             } else {
-                quad(vertices, matrix, relative, right, up, 0.56D, 0.12D,
-                        0.07F, 0.07F, 0.07F, 0.90F);
+                nz = dz >= 0.0D ? 1.0D : -1.0D;
             }
-            int rgb = Mth.hsvToRgb(health * 0.33F, 0.85F, 1.0F);
-            float red = ((rgb >> 16) & 0xFF) / 255.0F;
-            float green = ((rgb >> 8) & 0xFF) / 255.0F;
-            float blue = (rgb & 0xFF) / 255.0F;
-            quadLeft(vertices, matrix, relative, right, up, 0.52D, 0.08D, health,
-                    red, green, blue, 1.0F);
+            float health = Mth.clamp(target.health(), 0.0F, 1.0F);
+            double slotWidth = Math.min(1.4D, 0.55D + target.distance() * 0.04D);
+            double slotHeight = slotWidth * 0.16D;
+            double hw = slotWidth * 0.5D;
+            double hh = slotHeight * 0.5D;
+            // 公告牌沿主导轴外抬：抬升量减掉牌子在法线方向上的半宽后还剩 0.1——
+            // 无论视角多斜，牌子靠墙的那条边都悬在方块面外侧 0.1，不会再切进舱壁
+            // 被深度测试剪成一条红丝（用户实测"血条卡墙里"：之前的公式视角一斜就切墙）。
+            double edge = hw * Math.abs(right.x * nx + right.y * ny + right.z * nz)
+                    + hh * Math.abs(up.x * nx + up.y * ny + up.z * nz);
+            double offset = 0.60D + edge;
+            double bx = center.x + nx * offset;
+            double by = center.y + ny * offset;
+            double bz = center.z + nz * offset;
+            billboardQuad(vertices, matrix, cameraPos, bx, by, bz, right, up,
+                    slotWidth * 1.15D, slotHeight * 1.5D, 0.0F, 0.0F, 0.0F, 0.78F);
+            if (health <= 0.001F) {
+                // 0%（破口）：整条亮红，水下/暗处也一眼能认出来。
+                billboardQuad(vertices, matrix, cameraPos, bx, by, bz, right, up,
+                        slotWidth, slotHeight, 0.95F, 0.12F, 0.10F, 1.0F);
+            } else {
+                billboardQuad(vertices, matrix, cameraPos, bx, by, bz, right, up,
+                        slotWidth, slotHeight, 0.07F, 0.07F, 0.07F, 0.90F);
+            }
+            if (health > 0.001F) {
+                int rgb = Mth.hsvToRgb(health * 0.33F, 0.85F, 1.0F);
+                float red = ((rgb >> 16) & 0xFF) / 255.0F;
+                float green = ((rgb >> 8) & 0xFF) / 255.0F;
+                float blue = (rgb & 0xFF) / 255.0F;
+                // 刚掉一点血时填充宽度小到看不见——给一个最小可见宽度，靠左对齐。
+                double fillWidth = Math.max(slotWidth * health, slotWidth * 0.12D);
+                double shift = (slotWidth - fillWidth) * 0.5D;
+                billboardQuad(vertices, matrix, cameraPos,
+                        bx - right.x * shift, by - right.y * shift, bz - right.z * shift,
+                        right, up, fillWidth, slotHeight * 0.6D, red, green, blue, 1.0F);
+            }
         }
         buffers.endBatch(BarRenderType.TYPE);
     }
 
-    private static void quad(VertexConsumer vertices, Matrix4f matrix, Vec3 center,
-                             Vec3 right, Vec3 up, double width, double height,
-                             float r, float g, float b, float a) {
-        Vec3 left = center.add(right.scale(-width * 0.5D));
-        Vec3 bottom = left.add(up.scale(-height * 0.5D));
-        Vec3 top = bottom.add(up.scale(height));
-        Vec3 rightBottom = bottom.add(right.scale(width));
-        Vec3 rightTop = top.add(right.scale(width));
-        vertex(vertices, matrix, bottom, r, g, b, a);
-        vertex(vertices, matrix, rightBottom, r, g, b, a);
-        vertex(vertices, matrix, rightTop, r, g, b, a);
-        vertex(vertices, matrix, top, r, g, b, a);
+    /** 相机坐标系里的一个实心四边形（公告牌），顶点在世界坐标给出。 */
+    private static void billboardQuad(VertexConsumer vertices, Matrix4f matrix, Vec3 cameraPos,
+                                      double cx, double cy, double cz,
+                                      Vec3 right, Vec3 up,
+                                      double width, double height,
+                                      float r, float g, float b, float a) {
+        double hw = width * 0.5D;
+        double hh = height * 0.5D;
+        billboardVertex(vertices, matrix, cameraPos,
+                cx - right.x * hw - up.x * hh, cy - right.y * hw - up.y * hh,
+                cz - right.z * hw - up.z * hh, r, g, b, a);
+        billboardVertex(vertices, matrix, cameraPos,
+                cx + right.x * hw - up.x * hh, cy + right.y * hw - up.y * hh,
+                cz + right.z * hw - up.z * hh, r, g, b, a);
+        billboardVertex(vertices, matrix, cameraPos,
+                cx + right.x * hw + up.x * hh, cy + right.y * hw + up.y * hh,
+                cz + right.z * hw + up.z * hh, r, g, b, a);
+        billboardVertex(vertices, matrix, cameraPos,
+                cx - right.x * hw + up.x * hh, cy - right.y * hw + up.y * hh,
+                cz - right.z * hw + up.z * hh, r, g, b, a);
     }
 
-    /** 从左端开始填充的长度条。 */
-    private static void quadLeft(VertexConsumer vertices, Matrix4f matrix, Vec3 center,
-                                 Vec3 right, Vec3 up, double width, double height, float ratio,
-                                 float r, float g, float b, float a) {
-        double filled = width * Mth.clamp(ratio, 0.0F, 1.0F);
-        Vec3 left = center.add(right.scale(-width * 0.5D));
-        Vec3 bottom = left.add(up.scale(-height * 0.5D));
-        Vec3 top = bottom.add(up.scale(height));
-        Vec3 rightBottom = bottom.add(right.scale(filled));
-        Vec3 rightTop = top.add(right.scale(filled));
-        vertex(vertices, matrix, bottom, r, g, b, a);
-        vertex(vertices, matrix, rightBottom, r, g, b, a);
-        vertex(vertices, matrix, rightTop, r, g, b, a);
-        vertex(vertices, matrix, top, r, g, b, a);
-    }
-
-    private static void vertex(VertexConsumer vertices, Matrix4f matrix, Vec3 pos,
-                               float r, float g, float b, float a) {
-        vertices.vertex(matrix, (float) pos.x, (float) pos.y, (float) pos.z)
+    private static void billboardVertex(VertexConsumer vertices, Matrix4f matrix, Vec3 cameraPos,
+                                        double x, double y, double z,
+                                        float r, float g, float b, float a) {
+        vertices.vertex(matrix,
+                        (float) (x - cameraPos.x),
+                        (float) (y - cameraPos.y),
+                        (float) (z - cameraPos.z))
                 .color(r, g, b, a)
                 .endVertex();
     }

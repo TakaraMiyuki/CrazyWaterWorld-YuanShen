@@ -15,7 +15,7 @@ edges:
   - target: context/tools.md
     condition: when changing texture generation, GameTest templates, or the AsmDump helper
 grounds_to: []
-last_updated: 2026-11-03
+last_updated: 2026-11-04
 mex:
   id: mx_01M6FTBTA32ESJGHB433FWZZZ3
   type: architecture
@@ -45,7 +45,7 @@ mex:
 3. `ShipSimulation` 为每个舱室维护一个标量水量；破口、水泵、压载、反应堆都改这个数值，不直接写世界水方块。船壳本身是逐方块耐久（`HullDamage`）：左键/爆炸/撞击先扣剩余比例；伤害 ≥10% 开始小漏、≥70% 大漏，0% 时方块切成 `HullBlock.BREACHED`（保留数据、无碰撞、不可见），几何扫描把它当洞，走连海空腔进水；焊接回 >0 恢复实体。
 4. 如果装了 Valkyrien Skies 2，`VsPilot` 把整船方块收进 VS2 物理船，逐 tick 把推进、压载、进水比例同步给 `VsThruster`，并按需把船内状态（舱室拆分成的矩形棱柱 + 水面 + 破口位置/所属空腔/朝内方向/空腔上下界）打包成 `ShipWaterStatePacket` 发给客户端。
 5. 深海维度是空气海域：`DeepSeaChunkGenerator` 生成岩层和空腔，`OceanEnvironment` 用维度高度、哨站盒子和船内干燥区判断“是否浸没”。
-6. 客户端只做表现：`SonarScreen` / `SonarRenderer`、`DepthOverlay`、`UnderwaterEffects` / `UnderwaterMovement`、`ShipWaterRenderer` 负责舱内水面绘制（客户端自绘，10 Hz packet + 逐帧插值）以及破口进水视觉（空气侧水花、水下气泡）；`HullDamageRenderer` 画受损方块上方的红→绿耐久条，`HullDamageOverlay` 在准星下方显示船壳百分比。
+6. 客户端只做表现：`SonarScreen` / `SonarRenderer`、`DepthOverlay`、`UnderwaterEffects` / `UnderwaterMovement`、`ShipWaterRenderer` 负责舱内水面绘制（客户端自绘，10 Hz packet + 逐帧插值；顶面高度按角点周围四格水位平均 + 波浪，相邻水柱之间不画台阶面）以及破口进水视觉（空气侧水花、水下气泡）；`HullDamageRenderer` 画受损方块的朝向相机公告牌耐久条（红→绿，0% 整条亮红）、六面原版裂痕和按泄漏强度的水花。
 
 ## Key Components
 
