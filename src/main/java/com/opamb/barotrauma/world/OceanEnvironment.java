@@ -29,14 +29,23 @@ public final class OceanEnvironment {
         boolean isDry(Level level, Vec3 pos);
     }
 
-    private static volatile DryZone dryZone;
+    // 客户端和集成服务端共用同一个 JVM（单人存档），必须分开存：
+    // 只留一份 volatile 的话，服务端启动时注册的 VsPilot 会覆盖客户端注册的
+    // ShipWaterRenderer，方块船还没装成刚体时 VsPilot 无法判定舱内，滤镜就会漏进舱里。
+    private static volatile DryZone clientDryZone;
+    private static volatile DryZone serverDryZone;
 
     private OceanEnvironment() {
     }
 
-    /** 由物理船实现注册；没有物理船时允许为 null。 */
-    public static void setDryZone(DryZone zone) {
-        dryZone = zone;
+    /** 客户端（渲染/滤镜）用的干燥区；由客户端初始化时注册。 */
+    public static void setClientDryZone(DryZone zone) {
+        clientDryZone = zone;
+    }
+
+    /** 服务端（氧气/生存）用的干燥区；由物理船模块注册。 */
+    public static void setServerDryZone(DryZone zone) {
+        serverDryZone = zone;
     }
 
     /** 这个位置是否位于深海的水柱体积内（不代表一定浸没，还要排除干燥区）。 */
@@ -59,6 +68,25 @@ public final class OceanEnvironment {
     }
 
     /**
+     * 初始潜艇“方块船形态”的固定干燥区。
+     *
+     * <p>方块船的 {@code ShipWaterStatePacket} 在部分时序下还没到客户端时，滤镜会把舱内
+     * 误判成水下；这艘船的位置是写死的，直接用内腔包围盒兜底。装配成物理船后会走
+     * {@link #dryZone} 的实时舱室判断。</p>
+     */
+    public static boolean isInsideStarterSubDryZone(Vec3 pos) {
+        if (pos == null) {
+            return false;
+        }
+        return pos.x > StarterSub.ORIGIN_X && pos.x < StarterSub.ORIGIN_X + StarterSub.SIZE_X - 1
+                // 上界留半格余量：舱内跳跃顶点眼睛约 -68.1，屋顶表面在 -67；
+                // 用 -67.5 既不会在跳跃时闪滤镜，也不会把贴着屋顶游泳的人算成干燥。
+                && pos.y >= StarterSub.ORIGIN_Y + 1
+                && pos.y < StarterSub.ORIGIN_Y + StarterSub.SIZE_Y - 0.5D
+                && pos.z > StarterSub.ORIGIN_Z && pos.z < StarterSub.ORIGIN_Z + StarterSub.SIZE_Z - 1;
+    }
+
+    /**
      * 方块船（还没收成 VS2 刚体的初始潜艇等）的干燥区。
      *
      * <p>服务端没有客户端水面包，只能找附近已加载的船核心；玩家出生在初始潜艇里时，
@@ -69,16 +97,18 @@ public final class OceanEnvironment {
         if (!isInOcean(level, pos) || isInOutpostDryZone(pos) || VsState.active()) {
             return false;
         }
+        boolean starterFallback = isInsideStarterSubDryZone(pos);
         ShipCoreBlockEntity core = ShipCores.nearestCore(level, BlockPos.containing(pos), 32.0D);
-        if (core == null) {
-            return false;
-        }
-        ShipState state = core.state();
+        ShipState state = core == null ? null : core.state();
         if (state == null) {
-            return false;
+            // 船状态还没扫出来：初始潜艇内腔按干燥兜底，别让玩家一出生就掉氧。
+            return starterFallback;
         }
         ShipWaterStatePacket packet = ShipWaterStateBuilder.build(state, -1L, false, 0.0F, 0.0F, 0.0F);
         float[] boxes = packet.boxes();
+        if (boxes.length < 7) {
+            return starterFallback;
+        }
         for (int i = 0; i + 6 < boxes.length; i += 7) {
             float minX = boxes[i];
             float minY = boxes[i + 1];
@@ -87,8 +117,11 @@ public final class OceanEnvironment {
             float maxY = boxes[i + 4] + 1.0F;
             float maxZ = boxes[i + 5] + 1.0F;
             float surface = boxes[i + 6];
+            // 干燥舱室允许眼睛在跳跃顶点短暂高过顶格；进水后仍以水面为准。
+            boolean dryBox = surface <= minY + 0.01F;
+            float top = maxY + (dryBox ? 1.0F : 0.0F);
             if (pos.x >= minX && pos.x <= maxX
-                    && pos.y >= minY && pos.y <= maxY
+                    && pos.y >= minY && pos.y <= top
                     && pos.z >= minZ && pos.z <= maxZ
                     && pos.y > surface + 0.01F) {
                 return true;
@@ -104,7 +137,9 @@ public final class OceanEnvironment {
         if (!isInOcean(level, pos) || isInOutpostDryZone(pos)) {
             return false;
         }
-        DryZone zone = dryZone;
+        // 按 side 选干燥区：单人存档里渲染线程和集成服务端在同一进程，
+        // 不能用同一份注册状态。
+        DryZone zone = level.isClientSide() ? clientDryZone : serverDryZone;
         return zone == null || !zone.isDry(level, pos);
     }
 }

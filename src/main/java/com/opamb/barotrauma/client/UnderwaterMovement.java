@@ -19,6 +19,9 @@ import net.minecraftforge.fml.common.Mod;
 @Mod.EventBusSubscriber(modid = BarotraumaMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class UnderwaterMovement {
 
+    /** 上浮/下潜使用同一速度，避免手感不对称。 */
+    private static final double SWIM_VERTICAL_SPEED = 0.12D;
+
     private UnderwaterMovement() {
     }
 
@@ -29,7 +32,7 @@ public final class UnderwaterMovement {
         }
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
-        if (player == null || mc.level == null || mc.screen != null
+        if (player == null || mc.level == null
                 || player.isSpectator() || player.isPassenger()) {
             return;
         }
@@ -37,14 +40,21 @@ public final class UnderwaterMovement {
             return;
         }
         Vec3 motion = player.getDeltaMovement();
-        double y = motion.y * 0.82D - 0.018D;
-        if (mc.options.keyJump.isDown()) {
-            y += 0.085D;
+        double y;
+        if (mc.screen != null) {
+            // 打开 GUI 时原版不再处理移动输入、重力照常拉人；这里保持悬浮，
+            // 否则在声纳/背包界面里会直接沉底。
+            y = 0.0D;
+        } else if (mc.options.keyJump.isDown()) {
+            // 直接给一个明确的上浮速度；不要在原版重力后的负速度上做加法。
+            y = SWIM_VERTICAL_SPEED;
+        } else if (mc.options.keyShift.isDown()) {
+            y = -SWIM_VERTICAL_SPEED;
+        } else {
+            // 松开按键后保持当前深度：不上浮也不下沉。
+            y = 0.0D;
         }
-        if (mc.options.keyShift.isDown()) {
-            y -= 0.070D;
-        }
-        player.setDeltaMovement(motion.x * 0.82D, y, motion.z * 0.82D);
+        player.setDeltaMovement(motion.x * 0.78D, y, motion.z * 0.78D);
         player.resetFallDistance();
     }
 }

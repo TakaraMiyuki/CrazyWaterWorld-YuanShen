@@ -77,6 +77,11 @@ public class ShipCoreBlockEntity extends BlockEntity {
             // 每 40 tick 检查船体有没有破洞；破了就重新分舱（破口舱室会变成"连海"并灌满）
             if (now % 40L == 0L && !be.state.hullIntact(level)) {
                 be.rescan(level);
+                com.opamb.barotrauma.BarotraumaMod.LOGGER.info(
+                        "[ship] 方块船船体破损，已重扫：舱室 {}｜连海 {}｜连海水 {} 单位",
+                        be.state.compartments().size(),
+                        be.state.geometry().openPockets().size(),
+                        Math.round(be.state.simulation().pocketWaterTotal()));
             }
             // 方块船也要把水面状态发给客户端（物理船走 VsPilot 的同步）
             if (now % 10L == 0L && now != be.lastWaterSyncGameTime) {

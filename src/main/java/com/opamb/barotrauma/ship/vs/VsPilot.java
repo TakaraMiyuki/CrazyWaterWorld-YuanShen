@@ -105,7 +105,9 @@ public final class VsPilot {
 
     static {
         VsState.install(VsPilot::observeCore, VsPilot::tryBreak);
-        OceanEnvironment.setDryZone(VsPilot::isInsideDryZone);
+        // 只注册服务端干燥区：单人存档里客户端和集成服务端同进程，
+        // 客户端渲染用的 ShipWaterRenderer 不能被这里覆盖（否则方块船舱内会漏滤镜）。
+        OceanEnvironment.setServerDryZone(VsPilot::isInsideDryZone);
     }
 
     /** 装配刚完成时 VS2 可能还没把这艘船标成"已加载"，推进器先挂在这里，下一 tick 再试。 */

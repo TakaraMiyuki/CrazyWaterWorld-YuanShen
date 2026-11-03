@@ -9,6 +9,8 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.opamb.barotrauma.BarotraumaMod;
 import com.opamb.barotrauma.network.ShipWaterStatePacket;
+import com.opamb.barotrauma.world.OceanEnvironment;
+import com.opamb.barotrauma.world.StarterSub;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -136,8 +138,16 @@ public final class ShipWaterRenderer {
      * 落在盒子里且高于该盒水面，就是干燥区。</p>
      */
     public static boolean isInsideDryZone(Level level, Vec3 pos) {
+        if (pos == null) {
+            return false;
+        }
         ShipWaterStatePacket data = state;
-        if (data.boxes().length < 7 || pos == null) {
+        if (!data.physical() && OceanEnvironment.isInsideStarterSubDryZone(pos)) {
+            // 初始潜艇位置固定，内腔范围也是固定的；水面包只用来提供“内腔灌到多高”。
+            // 没有水面包（刚进世界/核心还没扫）时按干燥兜底。
+            return isStarterCavityDry(data.boxes(), pos.y);
+        }
+        if (data.boxes().length < 7) {
             return false;
         }
         if (data.physical() && !lastShipFound) {
@@ -146,7 +156,37 @@ public final class ShipWaterRenderer {
         double lx = pos.x - lastDeltaX;
         double ly = pos.y - lastDeltaY;
         double lz = pos.z - lastDeltaZ;
-        float[] boxes = data.boxes();
+        return insideDryBox(data.boxes(), lx, ly, lz);
+    }
+
+    /**
+     * 初始潜艇内腔是否仍在水面之上。
+     *
+     * <p>只在覆盖初始潜艇的那几个盒子里找水面；没有一个盒子覆盖它说明水面包还没到，
+     * 按干燥处理。这样破壳进水后水面升高会正常把滤镜放进舱里。</p>
+     */
+    private static boolean isStarterCavityDry(float[] boxes, double eyeY) {
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            float minX = boxes[i];
+            float maxX = boxes[i + 3];
+            float minZ = boxes[i + 2];
+            float maxZ = boxes[i + 5];
+            // 盒子和初始潜艇内腔在 XZ 上有重叠，就认为它描述的是这艘船。
+            if (maxX + 1.0F < StarterSub.ORIGIN_X + 1
+                    || minX > StarterSub.ORIGIN_X + StarterSub.SIZE_X - 1
+                    || maxZ + 1.0F < StarterSub.ORIGIN_Z + 1
+                    || minZ > StarterSub.ORIGIN_Z + StarterSub.SIZE_Z - 1) {
+                continue;
+            }
+            if (eyeY <= boxes[i + 6] + 0.01F) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 通用盒测试：位置在舱室包围盒内且高于水面。干燥舱室允许跳跃时眼睛略微越过顶格。 */
+    private static boolean insideDryBox(float[] boxes, double px, double py, double pz) {
         for (int i = 0; i + 6 < boxes.length; i += 7) {
             float minX = boxes[i];
             float minY = boxes[i + 1];
@@ -155,10 +195,12 @@ public final class ShipWaterRenderer {
             float maxY = boxes[i + 4] + 1.0F;
             float maxZ = boxes[i + 5] + 1.0F;
             float surface = boxes[i + 6];
-            if (lx >= minX && lx <= maxX
-                    && ly >= minY && ly <= maxY
-                    && lz >= minZ && lz <= maxZ
-                    && ly > surface + 0.01F) {
+            boolean dryBox = surface <= minY + 0.01F;
+            float top = maxY + (dryBox ? 1.0F : 0.0F);
+            if (px >= minX && px <= maxX
+                    && py >= minY && py <= top
+                    && pz >= minZ && pz <= maxZ
+                    && py > surface + 0.01F) {
                 return true;
             }
         }

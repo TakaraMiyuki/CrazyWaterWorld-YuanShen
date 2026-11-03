@@ -24,7 +24,7 @@ public final class ClientSetup {
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
-            OceanEnvironment.setDryZone(ShipWaterRenderer::isInsideDryZone);
+            OceanEnvironment.setClientDryZone(ShipWaterRenderer::isInsideDryZone);
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.HULL_GLASS.get(), RenderType.cutout());
             // 测试船壳要真的透过去看见里面，cutout 只有全透明/全不透明两态，不够
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.TEST_HULL.get(), RenderType.translucent());

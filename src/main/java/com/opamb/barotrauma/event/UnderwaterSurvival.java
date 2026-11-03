@@ -5,6 +5,7 @@ import com.opamb.barotrauma.world.OceanEnvironment;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.player.Player;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingFallEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -37,6 +38,8 @@ public final class UnderwaterSurvival {
         boolean blockShipDry = OceanEnvironment.isInsideBlockShipDryZone(
                 player.level(), player.getEyePosition());
         if (!blockShipDry && OceanEnvironment.isSubmerged(player.level(), player.getEyePosition())) {
+            // 空气海域没有真实水，玩家落底时不能吃摔落伤害；持续清零坠落距离。
+            player.resetFallDistance();
             player.setAirSupply(player.getAirSupply() - 1);
             if (player.getAirSupply() <= -20) {
                 player.setAirSupply(0);
@@ -44,6 +47,14 @@ public final class UnderwaterSurvival {
             }
         } else {
             refill(player);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onFall(LivingFallEvent event) {
+        if (event.getEntity() instanceof Player player
+                && OceanEnvironment.isSubmerged(player.level(), player.position())) {
+            event.setCanceled(true);
         }
     }
 
