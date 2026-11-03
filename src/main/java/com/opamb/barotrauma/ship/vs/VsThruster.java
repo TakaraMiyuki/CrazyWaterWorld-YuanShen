@@ -37,6 +37,10 @@ public final class VsThruster implements ShipPhysicsListener {
     private static final double ACCEL_VERTICAL = 1.8D;
     /** 压载满水时额外的下沉比例（相对重力加速度）。 */
     private static final double BALLAST_WEIGHT = 0.35D;
+    /** 进水满舱时损失的浮力比例；剩下的 0.35 是船体结构本身的残余浮力。 */
+    private static final double FLOOD_WEIGHT = 0.65D;
+    /** 进水后给垂直速度的阻尼，避免满舱后像石头一样无限加速。 */
+    private static final double FLOOD_DRAG = 0.65D;
     /** 维度重力，和 data/valkyrienskies/vs_dimension_parameters/the_deep.json 里的 -10 对应。 */
     private static final double GRAVITY = 10.0D;
     /** 无垂直输入时阻尼残余垂速（1/秒）。 */
@@ -224,10 +228,15 @@ public final class VsThruster implements ShipPhysicsListener {
             az = hz / len * ACCEL * throttle;
         }
         double ay = throttleY * ACCEL_VERTICAL * throttle;
-        // 自己补浮力：VS2 对我们的自定义方块算不出排水量（实测 liquidOverlap 恒为 0），
-        // 不补的话船就是一块石头，直接沉底穿模。这里按"完全中性"补偿重力，
-        // 压载/进水再让它变重往下沉。
-        ay += GRAVITY * (1.0D - 0.5D * (clamp01(ballast) + clamp01(flooded)));
+        // 空气海域的浮力完全由数值计算：完整船体接近中性，压载/进水按比例扣掉浮力。
+        // 不再依赖 VS2 的 liquidOverlap（它对我们的自定义方块恒为 0），也不依赖世界里的水。
+        double ballastLoad = clamp01(ballast);
+        double floodLoad = clamp01(flooded);
+        ay += GRAVITY * (1.0D - BALLAST_WEIGHT * ballastLoad - FLOOD_WEIGHT * floodLoad);
+        if (floodLoad > 0.02D) {
+            // 满舱时给一个垂直阻尼，避免下沉速度无限增大；也保留一点“水阻”的手感。
+            ay += -vel.y() * FLOOD_DRAG;
+        }
 
         // 没有垂直输入时保持深度：VS2 的实际重力和我们补的 GRAVITY 不一定严格相等，
         // 不锁的话船会一直缓慢上浮（用户实测"物理船一直往上浮"）。这里用

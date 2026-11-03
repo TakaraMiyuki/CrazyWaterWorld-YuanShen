@@ -74,11 +74,12 @@ public final class OutpostBuilder {
      * 在哨站下面和周围挖一个椭球水池：半径 34×26×34，水平中心就是哨站中心，
      * 垂直中心 y=-72——**顶部只到 y=-46，不碰 y=-44 的顶板岩壁**（上一版中心 -150、
      * 椭球顶 -124 直接把顶板挖穿，哨站就悬在洞正中，被用户否了）。
-     * 观感是哨站下半截挂在水腔顶部、上半截嵌在岩壁里；气闸门外、初始潜艇停的位置都有水。
+     * 观感是哨站下半截挂在水腔顶部、上半截嵌在岩壁里；气闸门外、初始潜艇停的位置
+     * 现在都是空气，水下感由客户端滤镜表现。
      */
     public static void carveCavern(ChunkAccess chunk) {
         ChunkPos pos = chunk.getPos();
-        BlockState water = Blocks.WATER.defaultBlockState();
+        BlockState air = Blocks.AIR.defaultBlockState();
         for (int x = pos.getMinBlockX(); x <= pos.getMaxBlockX(); x++) {
             for (int z = pos.getMinBlockZ(); z <= pos.getMaxBlockZ(); z++) {
                 for (int y = -98; y <= -46; y++) {
@@ -86,7 +87,7 @@ public final class OutpostBuilder {
                     double dy = (y + 72) / 26.0D;
                     double dz = z / 34.0D;
                     if (dx * dx + dy * dy + dz * dz < 1.0D) {
-                        chunk.setBlockState(new BlockPos(x, y, z), water, false);
+                        chunk.setBlockState(new BlockPos(x, y, z), air, false);
                     }
                 }
             }

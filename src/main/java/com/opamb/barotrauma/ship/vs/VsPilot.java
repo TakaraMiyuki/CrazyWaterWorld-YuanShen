@@ -7,12 +7,14 @@ import com.opamb.barotrauma.registry.ModShipBlocks;
 import com.opamb.barotrauma.ship.ShipGeometry;
 import com.opamb.barotrauma.ship.ShipSimulation;
 import com.opamb.barotrauma.ship.ShipState;
+import com.opamb.barotrauma.world.OceanEnvironment;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -74,6 +76,8 @@ public final class VsPilot {
     private static java.util.List<BlockPos> guardCells = java.util.List.of();
     /** 水面状态同步计时。 */
     private static int waterSyncTimer;
+    /** 最近一次发给客户端的水面数据；服务端判断“玩家在哪个舱室、是否已进水”时复用。 */
+    private static ShipWaterStatePacket lastWaterPacket = ShipWaterStatePacket.empty();
     /** 上一次清舱内水用的整数偏移，避免每 tick 重复扫 273 格。 */
     private static int interiorOffsetX = Integer.MIN_VALUE;
     private static int interiorOffsetY = Integer.MIN_VALUE;
@@ -101,6 +105,7 @@ public final class VsPilot {
 
     static {
         VsState.install(VsPilot::observeCore, VsPilot::tryBreak);
+        OceanEnvironment.setDryZone(VsPilot::isInsideDryZone);
     }
 
     /** 装配刚完成时 VS2 可能还没把这艘船标成"已加载"，推进器先挂在这里，下一 tick 再试。 */
@@ -215,10 +220,7 @@ public final class VsPilot {
     }
 
     private static void dropStale() {
-        // 船没了，排水体/交互锚点也得撤掉，否则世界里留一层看不见的方块壳
-        if (HullPlug.active()) {
-            HullPlug.remove(lastLevel);
-        }
+        // 船没了，交互锚点也得撤掉。
         com.opamb.barotrauma.ship.water.ShipVolumeGuard.deactivate();
                 removeProxy(lastLevel);
         ship = null;
@@ -256,8 +258,6 @@ public final class VsPilot {
      */
     public static void resetForServerLifecycle() {
         boolean hadShip = ship != null || pendingShip != null;
-        // 传 null：只清 HullPlug 的静态形状/记录，不对旧世界执行 setBlock
-        HullPlug.remove(null);
         com.opamb.barotrauma.ship.water.ShipVolumeGuard.deactivate();
         ship = null;
         thruster = null;
@@ -285,6 +285,7 @@ public final class VsPilot {
         unstaticTicks = 0;
         simTickCounter = 0;
         waterStateLogCounter = 0;
+        lastWaterPacket = ShipWaterStatePacket.empty();
         VsState.deactivate();
         if (hadShip) {
             LOGGER.info("[vs] 服务器生命周期切换：已清理上一世界的物理船静态状态");
@@ -306,6 +307,43 @@ public final class VsPilot {
         }
         ServerShip managing = VsBridge.managingShip(level, pos);
         return managing != null && managing.getId() == ship.getId();
+    }
+
+    /**
+     * 玩家/实体是否在“未进水的船舱”里。
+     *
+     * <p>服务端用最近一次同步的水面包判断：把世界坐标换算回装配坐标，落在某个舱室
+     * bbox 内且高于该舱室水面，就是干燥区。这样破口舱室进水后，水面盖过眼睛就会
+     * 自动切回水下状态。</p>
+     */
+    public static boolean isInsideDryZone(Level level, Vec3 pos) {
+        if (ship == null || state == null || level == null || pos == null) {
+            return false;
+        }
+        ShipWaterStatePacket packet = lastWaterPacket;
+        float[] boxes = packet.boxes();
+        if (boxes.length < 7) {
+            return false;
+        }
+        double lx = pos.x - VsState.offsetX();
+        double ly = pos.y - VsState.offsetY();
+        double lz = pos.z - VsState.offsetZ();
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            float minX = boxes[i];
+            float minY = boxes[i + 1];
+            float minZ = boxes[i + 2];
+            float maxX = boxes[i + 3] + 1.0F;
+            float maxY = boxes[i + 4] + 1.0F;
+            float maxZ = boxes[i + 5] + 1.0F;
+            float surface = boxes[i + 6];
+            if (lx >= minX && lx <= maxX
+                    && ly >= minY && ly <= maxY
+                    && lz >= minZ && lz <= maxZ
+                    && ly > surface + 0.01F) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 把船状态推给物理推进器：油门 / 功率 / 压载 / 进水比例。 */
@@ -399,12 +437,7 @@ public final class VsPilot {
                     stableOffset(now.x - assembledPos.x, VsState.offsetX()),
                     stableOffset(now.y - assembledPos.y, VsState.offsetY()),
                     stableOffset(now.z - assembledPos.z, VsState.offsetZ()));
-            // 流体禁区跟着船整格挪（不铺方块，只更新舱室拦截范围）
-            com.opamb.barotrauma.ship.water.ShipVolumeGuard.setOffset(
-                    VsState.offsetX(), VsState.offsetY(), VsState.offsetZ());
-            // 船挪到新位置时，新舱室格原本是海水，不清就会"一开船瞬间灌满"。
-            // 只在整数偏移变化时清一次；不再每 10 tick 强制清（那会跟玩家的桶/水泵打架）。
-            // 清完新位置后，把船尾腾出来的旧格回填海水，避免开过的地方留一条空气隧道。
+            // 空气海域没有真实水要拦截；保留清水调用只为兼容旧存档里可能残留的水。
             clearShipVolumeWater(level, VsState.offsetX(), VsState.offsetY(), VsState.offsetZ(), now);
             moveProxy(level, VsState.offsetX(), VsState.offsetY(), VsState.offsetZ());
             // 船体破损对账：VS2 自己不支持船上破坏，我们靠船坞方块状态兜底
@@ -513,47 +546,12 @@ public final class VsPilot {
     }
 
     /**
-     * 船周围是不是海水（不是哨站/洞穴里的空气）。
+     * 空气海域不再通过世界里的水方块判断水下；船尾回填真实水也已停用。
      *
-     * <p>按船体包围盒在水平方向取 8 个点，水比空气多就算水下。
-     * 判定错最坏的后果是：在干洞里回填几格水，或者在水下少回填几格——
-     * 都不会影响舱内模拟。</p>
+     * <p>保留这个方法名是为了让旧调用点安全地变成 no-op，避免在空气海域里凭空造水。</p>
      */
     private static boolean isUnderwater(ServerLevel level, Vec3 center) {
-        if (snapshot.isEmpty()) {
-            return false;
-        }
-        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
-        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
-        for (BlockPos pos : snapshot.keySet()) {
-            minX = Math.min(minX, pos.getX());
-            minY = Math.min(minY, pos.getY());
-            minZ = Math.min(minZ, pos.getZ());
-            maxX = Math.max(maxX, pos.getX());
-            maxY = Math.max(maxY, pos.getY());
-            maxZ = Math.max(maxZ, pos.getZ());
-        }
-        double cx = (minX + maxX) / 2.0D + (center.x - assembledPos.x);
-        double cy = (minY + maxY) / 2.0D + (center.y - assembledPos.y);
-        double cz = (minZ + maxZ) / 2.0D + (center.z - assembledPos.z);
-        int dx = (maxX - minX) / 2 + 4;
-        int dz = (maxZ - minZ) / 2 + 4;
-        int[][] offsets = {
-                {dx, 0}, {-dx, 0}, {0, dz}, {0, -dz},
-                {dx, dz}, {dx, -dz}, {-dx, dz}, {-dx, -dz}
-        };
-        int water = 0;
-        int air = 0;
-        for (int[] offset : offsets) {
-            BlockPos pos = BlockPos.containing(cx + offset[0], cy, cz + offset[1]);
-            var state = level.getBlockState(pos);
-            if (state.getFluidState().is(net.minecraft.tags.FluidTags.WATER)) {
-                water++;
-            } else if (state.isAir()) {
-                air++;
-            }
-        }
-        return water > air;
+        return false;
     }
 
     private static void doClearShipVolumeWater(ServerLevel level, int dx, int dy, int dz) {
@@ -765,8 +763,7 @@ public final class VsPilot {
         interiorOffsetX = Integer.MIN_VALUE;
         interiorOffsetY = Integer.MIN_VALUE;
         interiorOffsetZ = Integer.MIN_VALUE;
-        com.opamb.barotrauma.ship.water.ShipVolumeGuard.setCells(guardCells);
-        LOGGER.info("[vs] 流体拦截（破损后）：舱室 {} 格 + 剩余船体 {} 格 = {} 格",
+        LOGGER.info("[vs] 空气海域（破损后）：舱室 {} 格 + 剩余船体 {} 格 = {} 格（真实水拦截保持停用）",
                 interiorCells.size(), snapshot.size(), guardCells.size());
         LOGGER.info("[vs] 船体破损：{} 格被破坏 → 重扫 {} 个舱室 / {} 处连海 / 舱容 {}",
                 broken.size(), geometry.compartments().size(), geometry.openPockets().size(),
@@ -934,8 +931,10 @@ public final class VsPilot {
     /** 把每个舱室的包围盒 + 水面高度发给客户端（自绘水面用）。 */
     private static void sendWaterState(ShipState st) {
         long shipId = ship != null ? ship.getId() : -1L;
-        ModNetwork.sendToAll(com.opamb.barotrauma.ship.ShipWaterStateBuilder.build(st, shipId, true,
-                (float) assembledPos.x, (float) assembledPos.y, (float) assembledPos.z));
+        ShipWaterStatePacket packet = com.opamb.barotrauma.ship.ShipWaterStateBuilder.build(st, shipId, true,
+                (float) assembledPos.x, (float) assembledPos.y, (float) assembledPos.z);
+        lastWaterPacket = packet;
+        ModNetwork.sendToAll(packet);
         if (++waterStateLogCounter % 60L == 0L) {
             LOGGER.info("[vs] 水面同步：船 {}｜密闭舱 {}｜连海 {}｜连海水 {} 单位｜进水 {}%",
                     shipId, st.compartments().size(), st.geometry().openPockets().size(),
@@ -1091,14 +1090,12 @@ public final class VsPilot {
         interiorOffsetX = Integer.MIN_VALUE;
         interiorOffsetY = Integer.MIN_VALUE;
         interiorOffsetZ = Integer.MIN_VALUE;
-        // 4) 流体禁区：不再铺任何排水方块——直接在 Level#setBlock 里拒绝把水写进"舱室格"。
-        //    只保护舱室，不保护船壳格：船壳格让海水自然填满，透过破口看出去不会有一圈干空气。
-        //    先清掉旧版本可能留下的排水体（旧存档）。
-        HullPlug.remove(level);
+        // 4) 空气海域：不再需要拦截/回填真实水。guardCells 仍保留，用于清掉旧存档里
+        //    可能残留的水方块和做诊断；LevelFluidGuardMixin 因为 guard 未激活而失效。
         guardCells = buildGuardCells(interiorCells);
-        com.opamb.barotrauma.ship.water.ShipVolumeGuard.activate(level, guardCells);
-        LOGGER.info("[vs] 流体拦截：舱室 {} 格 + 船体 {} 格 = {} 格",
-                interiorCells.size(), snapshot.size(), guardCells.size());
+        com.opamb.barotrauma.ship.water.ShipVolumeGuard.deactivate();
+        LOGGER.info("[vs] 空气海域：真实水拦截已停用（舱室 {} 格 + 船体 {} 格，保留清水/诊断）",
+                interiorCells.size(), snapshot.size());
         // 船坞偏移要等核心方块实体在船坞里 tick 之后才知道；破损对账先等 1 秒
         yardOffsetX = Integer.MIN_VALUE;
         yardOffsetY = Integer.MIN_VALUE;
@@ -1138,6 +1135,7 @@ public final class VsPilot {
             state = shipState;
             VsState.activate(core, shipState, VsPilot::isPhysicalHere, VsPilot::applyControl);
             applyControl(shipState);
+            sendWaterState(shipState);
             Vec3 pendingPos = VsBridge.position(assembled);
             return String.format(Locale.ROOT,
                     "已收成物理船：%d 格，质量 %.0f/%.0f，中心 (%.1f, %.1f, %.1f)；VS2 尚未加载，推进器下一 tick 补挂",
@@ -1149,11 +1147,11 @@ public final class VsPilot {
         state = shipState;
         VsState.activate(core, shipState, VsPilot::isPhysicalHere, VsPilot::applyControl);
         applyControl(shipState);
+        sendWaterState(shipState);
         Vec3 pos = VsBridge.position(assembled);
         return String.format(Locale.ROOT,
-                "已收成物理船：%d 格，质量 %.0f/%.0f，中心 (%.1f, %.1f, %.1f)，%s｜%s｜方块级移动/水位已停用，只用刚体",
-                captured.size(), lastMass, expected, pos.x, pos.y, pos.z, flags(level, assembled),
-                HullPlug.status());
+                "已收成物理船：%d 格，质量 %.0f/%.0f，中心 (%.1f, %.1f, %.1f)，%s｜方块级移动/水位已停用，只用刚体",
+                captured.size(), lastMass, expected, pos.x, pos.y, pos.z, flags(level, assembled));
     }
 
     /**
@@ -1224,8 +1222,7 @@ public final class VsPilot {
         } catch (Throwable error) {
             return "拆船失败（VS2 删船异常：" + error + "），船还在，方块没动";
         }
-        // 2) 按快照铺回世界。铺之前必须先撤排水体，否则它把那一片占着、方块铺不进去
-        HullPlug.remove(level);
+        // 2) 按快照铺回世界。
         com.opamb.barotrauma.ship.water.ShipVolumeGuard.deactivate();
                 removeProxy(level);
         int placed = restoreBlocks(level, restore, dx, dy, dz);
@@ -1323,15 +1320,14 @@ public final class VsPilot {
                 "物理船｜质量 %.0f｜中心 (%.1f, %.1f, %.1f)｜速度 (%.2f, %.2f, %.2f) = %.2f 格/秒"
                         + "｜推力实测 (%.0f, %.0f, %.0f) N｜%s｜%s｜%s"
                         + "｜位移 (%+d, %+d, %+d)｜快照 %d 格｜姿态 %s"
-                        + "｜physTick=%d 唤醒=%d 直压=%d｜%s",
+                        + "｜physTick=%d 唤醒=%d 直压=%d",
                 VsBridge.mass(live), pos.x, pos.y, pos.z, vel.x, vel.y, vel.z, vel.length(),
                 thruster == null ? 0 : thruster.lastForceX(),
                 thruster == null ? 0 : thruster.lastForceY(),
                 thruster == null ? 0 : thruster.lastForceZ(),
                 flags, VsBridge.physicsEntity(level, live), VsThruster.probe(),
                 dx, dy, dz, snapshot.size(), VsThruster.attitude(),
-                VsThruster.calls(), VsThruster.wakes(), VsThruster.directCalls(),
-                HullPlug.status());
+                VsThruster.calls(), VsThruster.wakes(), VsThruster.directCalls());
     }
 
     // ------------------------------------------------------------------ 进水诊断

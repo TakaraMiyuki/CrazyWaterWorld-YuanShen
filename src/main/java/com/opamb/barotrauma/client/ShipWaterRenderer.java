@@ -16,6 +16,7 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.InputEvent;
@@ -87,8 +88,16 @@ public final class ShipWaterRenderer {
     private static final boolean FIX_MAIN_WATER = !"false".equalsIgnoreCase(
             System.getProperty("barotrauma.waterFix", "true"));
 
+    /** 空气海域方案：不再绘制任何水体，只保留水面包用于“船舱是否干燥”的判断。 */
+    private static final boolean RENDER_WATER = false;
+
     private static volatile boolean debug = DEBUG_DEFAULT;
     private static volatile ShipWaterStatePacket state = ShipWaterStatePacket.empty();
+    /** 最近一帧的船体渲染位置相对装配锚点的位移，供 isInsideDryZone 使用。 */
+    private static volatile float lastDeltaX;
+    private static volatile float lastDeltaY;
+    private static volatile float lastDeltaZ;
+    private static volatile boolean lastShipFound;
     private static long packetCount;
     // 不要用 Long.MIN_VALUE 做初值：gameTime - Long.MIN_VALUE 会 long 溢出成负数，
     // 限频条件永远不成立。用 -100 让第一帧就输出一次。
@@ -118,6 +127,42 @@ public final class ShipWaterRenderer {
                     packet.physical(), packet.shipId(), packet.boxes().length / 7,
                     packet.anchorX(), packet.anchorY(), packet.anchorZ());
         }
+    }
+
+    /**
+     * 客户端判断某个位置是否在“未进水的船舱”里。
+     *
+     * <p>水面包里的盒子是装配坐标，渲染位置相对锚点的位移由 onRenderStage 每帧缓存；
+     * 落在盒子里且高于该盒水面，就是干燥区。</p>
+     */
+    public static boolean isInsideDryZone(Level level, Vec3 pos) {
+        ShipWaterStatePacket data = state;
+        if (data.boxes().length < 7 || pos == null) {
+            return false;
+        }
+        if (data.physical() && !lastShipFound) {
+            return false;
+        }
+        double lx = pos.x - lastDeltaX;
+        double ly = pos.y - lastDeltaY;
+        double lz = pos.z - lastDeltaZ;
+        float[] boxes = data.boxes();
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            float minX = boxes[i];
+            float minY = boxes[i + 1];
+            float minZ = boxes[i + 2];
+            float maxX = boxes[i + 3] + 1.0F;
+            float maxY = boxes[i + 4] + 1.0F;
+            float maxZ = boxes[i + 5] + 1.0F;
+            float surface = boxes[i + 6];
+            if (lx >= minX && lx <= maxX
+                    && ly >= minY && ly <= maxY
+                    && lz >= minZ && lz <= maxZ
+                    && ly > surface + 0.01F) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** F9 切换诊断；默认关闭，不需要重启客户端。 */
@@ -159,10 +204,8 @@ public final class ShipWaterRenderer {
                     missingShipLogged = true;
                     BarotraumaMod.LOGGER.warn("[water] 客户端找不到船 id={}", data.shipId());
                 }
-                // 诊断标记不依赖 ClientShip，仍然要画，否则无法区分"没船"和"没渲染"。
-                if (!debug) {
-                    return;
-                }
+                lastShipFound = false;
+                return;
             }
         }
 
@@ -174,6 +217,16 @@ public final class ShipWaterRenderer {
             dx = (float) (now.x() - data.anchorX());
             dy = (float) (now.y() - data.anchorY());
             dz = (float) (now.z() - data.anchorZ());
+        }
+        lastDeltaX = dx;
+        lastDeltaY = dy;
+        lastDeltaZ = dz;
+        lastShipFound = true;
+
+        // 空气海域：不再画水体。保留下面的旧渲染代码只是为了保留诊断/回退参考，
+        // 正常路径在这里直接返回。
+        if (!RENDER_WATER) {
+            return;
         }
 
         // 原有的 1Hz 运行日志保持不变（不是新的详细诊断）。

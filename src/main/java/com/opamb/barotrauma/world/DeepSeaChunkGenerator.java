@@ -104,7 +104,8 @@ public class DeepSeaChunkGenerator extends ChunkGenerator {
         int originZ = chunkPos.getMinBlockZ();
         int minY = chunk.getMinBuildHeight();
 
-        BlockState water = Blocks.WATER.defaultBlockState();
+        // 海域用空气而不是真实水：水下效果由客户端雾/滤镜表现，进水走数值模拟。
+        BlockState ocean = Blocks.AIR.defaultBlockState();
         BlockState ice = Blocks.PACKED_ICE.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
         BlockState deepslate = Blocks.DEEPSLATE.defaultBlockState();
@@ -137,7 +138,7 @@ public class DeepSeaChunkGenerator extends ChunkGenerator {
             }
         }
 
-        // 3) 分层海域：上下是起伏的岩层，中间一大片开阔水域
+        // 3) 分层海域：上下是起伏的岩层，中间一大片开阔空气（视觉上由水下滤镜表现）
         for (int lx = 0; lx < 16; lx++) {
             for (int lz = 0; lz < 16; lz++) {
                 int x = originX + lx;
@@ -158,13 +159,13 @@ public class DeepSeaChunkGenerator extends ChunkGenerator {
 
                 for (int y = ModDimensions.WATER_TOP_Y; y >= ModDimensions.WATER_BOTTOM_Y; y--) {
                     if (y > BAND_TOP_Y) {
-                        setBlock(chunk, x, y, z, water);
+                        setBlock(chunk, x, y, z, ocean);
                         continue;
                     }
                     double k = (BAND_TOP_Y - y) / (double) LAYER_HEIGHT;
                     double frac = k - Math.floor(k);
                     if (frac >= roof && frac <= floor) {
-                        setBlock(chunk, x, y, z, water);
+                        setBlock(chunk, x, y, z, ocean);
                     }
                 }
             }

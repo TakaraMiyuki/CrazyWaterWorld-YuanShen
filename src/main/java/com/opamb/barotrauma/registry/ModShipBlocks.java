@@ -71,32 +71,6 @@ public final class ModShipBlocks {
                     .isViewBlocking((state, level, pos) -> false)
                     .isSuffocating((state, level, pos) -> false)));
 
-    /**
-     * 物理船的"排水体"（内部方块，玩家拿不到）。
-     *
-     * <p>VS2 装船会把船体方块从世界里挖走，海里那一块空腔立刻被海水灌满——透过船壳看
-     * 就是"船舱里全是水"。装船后用这个方块把船占的包围盒填死，水就进不来了。</p>
-     *
-     * <p>三个必须同时满足的性质：</p>
-     * <ul>
-     *   <li>{@code noOcclusion} + 模型里没有 element → <b>完全不可见</b>；</li>
-     *   <li>{@code noCollission} → <b>不挡玩家</b>，船里照常走动；</li>
-     *   <li>是普通方块、不可替换 → <b>挡水</b>，空腔里一直是空气。</li>
-     * </ul>
-     * <p><b>它不算船体方块</b>（不在 {@link #isShipBlock} 里），否则船体扫描会把排水体
-     * 当成船壳，越扫越大。</p>
-     */
-    public static final RegistryObject<Block> HULL_PLUG = BLOCKS.register("hull_plug",
-            () -> new Block(BlockBehaviour.Properties.of()
-                    .mapColor(MapColor.NONE)
-                    .strength(-1.0F, 3600000.0F)
-                    .noLootTable()
-                    .noOcclusion()
-                    .noCollission()
-                    .isViewBlocking((state, level, pos) -> false)
-                    .isSuffocating((state, level, pos) -> false)));
-
-
     public static final RegistryObject<Block> STATION_PLATING = BLOCKS.register("station_plating",
             () -> new Block(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_BLACK)

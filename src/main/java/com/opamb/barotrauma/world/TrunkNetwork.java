@@ -36,7 +36,7 @@ public final class TrunkNetwork {
     /** 竖井概率。原来是 0.18，上下层之间经常找不到路，提到 0.45。 */
     private static final double SHAFT_CHANCE = 0.45;
 
-    private static final BlockState WATER = Blocks.WATER.defaultBlockState();
+    private static final BlockState AIR = Blocks.AIR.defaultBlockState();
     private static final AtomicLong TOTAL_CARVED = new AtomicLong();
 
     /**
@@ -57,7 +57,7 @@ public final class TrunkNetwork {
         return TOTAL_CARVED.get();
     }
 
-    /** 把和本区块相交的主干道挖出来（挖成水）。返回本区块挖掉的方块数。 */
+    /** 把和本区块相交的主干道挖出来（挖成空气）。返回本区块挖掉的方块数。 */
     public static int carveInto(ChunkAccess chunk, long seed) {
         ChunkPos pos = chunk.getPos();
         int margin = (int) Math.ceil(RADIUS) + 1;
@@ -166,7 +166,7 @@ public final class TrunkNetwork {
                     if (q > 1.0D) {
                         continue;
                     }
-                    if (setWater(chunk, x, y, z)) {
+                    if (setAir(chunk, x, y, z)) {
                         carved++;
                     }
                 }
@@ -175,16 +175,16 @@ public final class TrunkNetwork {
         return carved;
     }
 
-    private static boolean setWater(ChunkAccess chunk, int x, int y, int z) {
+    private static boolean setAir(ChunkAccess chunk, int x, int y, int z) {
         int sectionIndex = (y - chunk.getMinBuildHeight()) >> 4;
         LevelChunkSection section = chunk.getSection(sectionIndex);
         int lx = x & 15;
         int ly = y & 15;
         int lz = z & 15;
-        if (section.getBlockState(lx, ly, lz).is(Blocks.WATER)) {
+        if (section.getBlockState(lx, ly, lz).isAir()) {
             return false;
         }
-        section.setBlockState(lx, ly, lz, WATER, false);
+        section.setBlockState(lx, ly, lz, AIR, false);
         return true;
     }
 

@@ -73,19 +73,19 @@ public final class VsFloodSmoke {
     }
 
     /**
-     * 启动隔离场景。返回 false 表示连场景都没法搭（找不到干净水域），调用方应直接关服。
+     * 启动隔离场景。返回 false 表示连场景都没法搭（找不到干净空腔），调用方应直接关服。
      */
     public static boolean begin(ServerLevel deep) {
         level = deep;
-        BlockPos center = findWaterSpot(deep);
+        BlockPos center = findAirSpot(deep);
         if (center == null) {
-            BarotraumaMod.LOGGER.warn("{} 找不到 9×9×9 全是水的干净位置，场景终止", TAG);
+            BarotraumaMod.LOGGER.warn("{} 找不到 9×9×9 空气空腔，场景终止", TAG);
             return false;
         }
         origin = center.offset(-HULL_SIZE / 2, -HULL_SIZE / 2, -HULL_SIZE / 2);
         forceChunks(deep, origin);
         buildHull(deep);
-        BarotraumaMod.LOGGER.info("{} 船位 {}（中心 {}），周围 9³ 全是水", TAG, origin, center);
+        BarotraumaMod.LOGGER.info("{} 船位 {}（中心 {}），周围 9³ 是空气（空气海域）", TAG, origin, center);
         ShipState state = scan(deep);
         if (state != null) {
             BarotraumaMod.LOGGER.info("{} 扫描：{}", TAG,
@@ -130,9 +130,9 @@ public final class VsFloodSmoke {
         if (--countdown > 0) {
             // 阶段 2 中途探针：船有没有动、排水体跟没跟过去
             if (phase == 2 && countdown == WAIT_TICKS / 2) {
-                BarotraumaMod.LOGGER.info("{} 阶段2 中途：船位置={} 速度={} 偏移={},{},{} 排水体={}",
+                BarotraumaMod.LOGGER.info("{} 阶段2 中途：船位置={} 速度={} 偏移={},{},{}",
                         TAG, VsPilot.shipPosition(), VsPilot.shipVelocity(),
-                        VsState.offsetX(), VsState.offsetY(), VsState.offsetZ(), HullPlug.status());
+                        VsState.offsetX(), VsState.offsetY(), VsState.offsetZ());
                 logMeasure("阶段2 中途", countBox(deep));
             }
             return false;
@@ -152,9 +152,8 @@ public final class VsFloodSmoke {
     private static void afterRaw(ServerLevel deep) {
         rawAfterWait = countBox(deep);
         logMeasure("阶段1 装配后 40 tick", rawAfterWait);
-        BarotraumaMod.LOGGER.info("{} 判定：{}", TAG, rawAfterWait[0] > 0
-                ? "原始装配确实把船位灌成水（" + rawAfterWait[0] + " 格）→ 排水体的前提成立"
-                : "原始装配 40 tick 后船位没有水 → 排水体多余，进水另有原因");
+        BarotraumaMod.LOGGER.info("{} 判定：空气海域下原始装配不灌真实水（实测 {} 格）→ 符合空气海域方案",
+                TAG, rawAfterWait[0]);
 
         if (rawShip != null) {
             try {
@@ -183,7 +182,6 @@ public final class VsFloodSmoke {
         String result = VsPilot.launch(deep, blocks.keySet(), state, origin.offset(2, 1, 2));
         BarotraumaMod.LOGGER.info("{} 阶段2 正式管线装配：{}", TAG, result);
         logMeasure("阶段2 装配后立即", countBox(deep));
-        BarotraumaMod.LOGGER.info("{} 阶段2 排水体：{}", TAG, HullPlug.status());
         if (VsPilot.hasShip()) {
             phase = 2;
             countdown = WAIT_TICKS;
@@ -198,10 +196,11 @@ public final class VsFloodSmoke {
         logMeasure("阶段2 装配后 40 tick", plugAfterWait);
         interiorSealed = countInteriorWater(deep);
         if (interiorSealed == 0) {
-            BarotraumaMod.LOGGER.info("{} 判定：舱内水=0（外层船壳格水={} 是正常的，船壳格不再铺排水体）"
-                    + " → 舱内流体拦截生效", TAG, plugAfterWait[0]);
+            BarotraumaMod.LOGGER.info("{} 判定：空气海域下舱内没有真实水（外层水={}）→ 符合方案",
+                    TAG, plugAfterWait[0]);
         } else {
-            BarotraumaMod.LOGGER.warn("{} 判定：舱内仍有 {} 格水（流体拦截失效）", TAG, interiorSealed);
+            BarotraumaMod.LOGGER.warn("{} 判定：舱内仍有 {} 格真实水（空气海域下不应出现）",
+                    TAG, interiorSealed);
         }
 
         // 破口进水链路：直接在船坞里拆一格船壳，等价于物理船上砸洞。
@@ -245,10 +244,10 @@ public final class VsFloodSmoke {
         docked = countBox(deep);
         logMeasure("阶段2 拆回后（按原位量，船若漂移过以拆船报告位移为准）", docked);
 
-        BarotraumaMod.LOGGER.info("{} 汇总｜原始装配后水={}｜正式管线后外层水={} 舱内水={} 排水体={}"
+        BarotraumaMod.LOGGER.info("{} 汇总｜原始装配后水={}｜正式管线后外层水={} 舱内水={}"
                         + "｜破口后模拟水={} 连海={}｜原始拆回后水={}｜正式拆回后水={}",
                 TAG, rawAfterWait == null ? -1 : rawAfterWait[0],
-                plugAfterWait[0], interiorSealed, plugAfterWait[2],
+                plugAfterWait[0], interiorSealed,
                 Math.round(pocketAfterWait), openPocketsAfterWait,
                 rawRestored == null ? -1 : rawRestored[0],
                 docked[0]);
@@ -271,13 +270,13 @@ public final class VsFloodSmoke {
 
     // ------------------------------------------------------------------ 场地与测量
 
-    /** 找一片 9×9×9（留 2 格边距）全是水的干净位置。 */
-    private static BlockPos findWaterSpot(ServerLevel deep) {
+    /** 找一片 9×9×9（留 2 格边距）全是空气的干净空腔。 */
+    private static BlockPos findAirSpot(ServerLevel deep) {
         int[] anchors = {400, 384, 416, 368, 432, 352, 448};
         for (int cx : anchors) {
             for (int cz : anchors) {
-                for (int cy = -60; cy >= -140; cy -= 4) {
-                    if (isAllWater(deep, cx, cy, cz, 4)) {
+                for (int cy = -40; cy >= -180; cy -= 4) {
+                    if (isAllAir(deep, cx, cy, cz, 4)) {
                         return new BlockPos(cx, cy, cz);
                     }
                 }
@@ -286,12 +285,11 @@ public final class VsFloodSmoke {
         return null;
     }
 
-    private static boolean isAllWater(ServerLevel deep, int cx, int cy, int cz, int radius) {
+    private static boolean isAllAir(ServerLevel deep, int cx, int cy, int cz, int radius) {
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -radius; dy <= radius; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
-                    if (!deep.getBlockState(new BlockPos(cx + dx, cy + dy, cz + dz))
-                            .getFluidState().is(FluidTags.WATER)) {
+                    if (!deep.getBlockState(new BlockPos(cx + dx, cy + dy, cz + dz)).isAir()) {
                         return false;
                     }
                 }
@@ -356,11 +354,10 @@ public final class VsFloodSmoke {
         return out;
     }
 
-    /** 数船位 5×5×5：{水, 空气, 排水体, 其它}。 */
+    /** 数船位 5×5×5：{水, 空气, 其它}。 */
     private static int[] countBox(ServerLevel deep) {
         int water = 0;
         int air = 0;
-        int plug = 0;
         int other = 0;
         for (int dx = 0; dx < HULL_SIZE; dx++) {
             for (int dy = 0; dy < HULL_SIZE; dy++) {
@@ -370,20 +367,18 @@ public final class VsFloodSmoke {
                         water++;
                     } else if (state.isAir()) {
                         air++;
-                    } else if (state.is(ModShipBlocks.HULL_PLUG.get())) {
-                        plug++;
                     } else {
                         other++;
                     }
                 }
             }
         }
-        return new int[]{water, air, plug, other};
+        return new int[]{water, air, other};
     }
 
     private static void logMeasure(String label, int[] m) {
-        BarotraumaMod.LOGGER.info("{} {}：水={} 空气={} 排水体={} 别的={}（共 {} 格）", TAG, label,
-                m[0], m[1], m[2], m[3], m[0] + m[1] + m[2] + m[3]);
+        BarotraumaMod.LOGGER.info("{} {}：水={} 空气={} 别的={}（共 {} 格）", TAG, label,
+                m[0], m[1], m[2], m[0] + m[1] + m[2]);
     }
 
     private static void reset() {
