@@ -2,6 +2,14 @@
 
 > 只追加、不修改、不删除；最新条目在最上面。格式见 `club/CLUB.md` 附录 D。
 
+## 2026-11-03 · opamber258
+
+**决定**：深海海域从真实水方块改为空气，水下感由客户端雾/滤镜表现；船内进水继续用每舱标量水位，删除 `hull_plug`。
+
+**理由**：真实水会触发 VS2 实体区块碰撞异常，物理船装配后海水还会灌进船体；空气海域可以让船体、哨站和舱室保持真正的空气环境，同时用客户端效果维持水下观感。
+
+**影响**：`world/` 生成空气海域；新增 `world/OceanEnvironment`、`client/UnderwaterEffects`、`client/UnderwaterMovement`、`event/UnderwaterSurvival`；`ShipWaterRenderer` 停止绘制外部水面，水面包只用于干湿判断；`hull_plug` 方块/类/资源删除，旧存档可能缺失方块。详见 `club/ARCHITECTURE.md`。
+
 ## 2026-11-02 · opamber258
 
 **决定**：初始化 Club v1 协作协议。

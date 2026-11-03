@@ -2491,7 +2491,8 @@ run/.smoketest-vs + runServer --offline   → exit 0
 修复：
 
 - `VsPilot.resetForServerLifecycle()`：纯内存清理 `ship/thruster/state/corePos/snapshot/guard/pending/lastLevel`
-  等静态字段；`HullPlug.remove(null)` 只清静态形状，不向旧世界写方块；最后 `VsState.deactivate()`。
+  等静态字段；最后 `VsState.deactivate()`。
+- 空气海域改造后，`hull_plug` 方块注册、`HullPlug` 类、模型/blockstate 和全部调用已彻底删除。
 - `DeepSeaEvents`：新增 `ServerStoppedEvent` 处理，并在 `ServerStartedEvent` 兜底再清一次；
   `resetShipRuntime()` 只在 VS2 可用时加载 `VsPilot`，没装 VS2 也不会触发类加载。
 - `StarterSub.ensure()`：只有 `VsState.corePos()` 等于初始潜艇核心时才跳过；玩家先装了别的船时，
@@ -2511,4 +2512,17 @@ run/.smoketest-vs + runServer --offline → BUILD SUCCESSFUL
 
 日志确认服务器启动/停止都会执行 `[Barotrauma] 已清理物理船静态状态`。
 
-未覆盖：多世界客户端流程仍需手动验证（世界 A 装船不拆 → 退回标题 → 世界 B 看初始潜艇是否生成）。
+多世界客户端实测（2026-11-02 21:07–21:09，`run-client/logs/latest.log`）：
+
+```
+21:07:46 世界22 初始潜艇已建造：core={x=1,y=-71,z=20}
+21:07:59 世界22 装配 403 格，ship=4
+21:08:31 世界22 服务器停止 → 已清理物理船静态状态（服务器停止）
+21:08:53 世界23 服务器启动 → 已清理物理船静态状态（服务器启动）
+21:08:54 世界23 初始潜艇已建造：core={x=1,y=-71,z=20}
+21:09:09 世界23 装配 403 格，ship=4；水面同步正常
+```
+
+世界 23 没有再出现“初始潜艇已收成物理船，跳过重建”。世界 22 在 21:08:19 有一次
+“客户端找不到船 id=4”，但世界 23 同流程未复现；这是客户端 VS2 船同步的独立问题，
+不是跨世界静态状态泄漏，后续若再出现单独查。

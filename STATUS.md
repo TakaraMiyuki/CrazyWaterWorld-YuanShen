@@ -394,6 +394,10 @@ Remove-Item run\.smoketest-vs
    已在 `ServerStoppedEvent` / `ServerStartedEvent` 调 `VsPilot.resetForServerLifecycle()`；
    `StarterSub.ensure()` 只跳过核心坐标等于初始潜艇核心的物理船。
    **不要再把 `VsState.active()` 当成“当前世界有物理船”**。
+   已用客户端实测：世界 22 装船不拆 → 世界 23 启动清理并重新建造初始潜艇，日志见 PLAN §10.54。
+14. **`hull_plug` 已彻底删除**（2026-11-02）：方块注册、`HullPlug` 类、模型/blockstate 和全部调用
+   都已移除；新船不会再铺任何排水方块。旧存档里若还残留 `barotrauma:hull_plug`，加载时可能被
+   当成缺失方块；需要旧存档兼容时再单独做迁移。
 
 ## 查资料的路子
 

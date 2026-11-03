@@ -445,7 +445,9 @@ Remove-Item run\.smoketest-vs
 修复：
 
 - `VsPilot.resetForServerLifecycle()`：纯内存清空 `ship/thruster/state/corePos/snapshot/guard/pending/lastLevel`
-  等静态字段；`HullPlug.remove(null)` 只清静态记录，不向旧世界写方块。
+  等静态字段。
+- `hull_plug` 方块注册、`HullPlug` 类、模型/blockstate 和全部调用已删除；旧存档里若还有这个方块，
+  加载时可能被当成缺失方块。
 - `DeepSeaEvents`：订阅 `ServerStoppedEvent`，并在 `ServerStartedEvent` 兜底清理。
 - `StarterSub.ensure()`：只有 `VsState.corePos()` 等于初始潜艇核心时才跳过；玩家先装别的船时，
   初始潜艇仍会生成。
@@ -453,4 +455,11 @@ Remove-Item run\.smoketest-vs
 验证：`test` 26 PASSED、`build` 成功、GameTest 3/3、`.smoketest-vs` 通过；日志确认服务器启停
 都执行“已清理物理船静态状态”。
 
-仍未覆盖：多世界客户端流程需要手动复现（世界 A 装船不拆 → 退回标题 → 世界 B 检查初始潜艇）。
+多世界客户端实测（2026-11-02 21:07–21:09）：
+
+- 世界 22：初始潜艇建造 → 装配 403 格 ship=4 → 不拆船退回标题。
+- 世界 23：启动时执行清理 → 初始潜艇重新建造 → 再装配 403 格 ship=4，水面同步正常。
+- 世界 23 没有再出现“初始潜艇已收成物理船，跳过重建”。
+
+世界 22 曾在 21:08:19 出现一次“客户端找不到船 id=4”，世界 23 未复现；按客户端 VS2 船同步
+的独立问题记录，不要和跨世界静态状态泄漏混为一谈。
