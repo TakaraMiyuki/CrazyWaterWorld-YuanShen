@@ -48,10 +48,9 @@ Then read this file fully before doing anything else in this session.
 
 **Known issues:**
 - The current MEX code graph indexes only the 3 files under `tools/`; Java sources are not in the graph. Use Grep/Read for Java.
-- `OceanEnvironment.dryZone` is a single static field registered by both client and server; integrated-server setups can overwrite each other.
 - `ShipWaterRenderer.RENDER_WATER = false`; missing ship-interior water is intentional, not a render bug.
 - The existing `run/world` predates the air-ocean change; L3 `.smoketest-vs` currently stops with “找不到 9×9×9 空气空腔” until `run/world` is deleted and regenerated.
-- `README.md` and `docs/IMPLEMENTATION.md` describe older water-column behavior and are stale.
+- `docs/IMPLEMENTATION.md` still describes the older water-column world; prefer the code and `.mex/context/architecture.md` when they conflict.
 
 ## Routing Table
 

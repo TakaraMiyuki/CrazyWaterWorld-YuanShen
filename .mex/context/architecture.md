@@ -55,7 +55,7 @@ mex:
 - **`ship/vs/VsPilot`** — VS2 物理船的唯一静态管理器：装配/拆回、推进器、船坞偏移、破口对账、水量同步、声纳代理方块移动。`VsState` 提供不引用 VS2 类型的桥接，`VsSupport` 只做 `ModList.isLoaded("valkyrienskies")` 判断。
 - **`ship/water/ShipVolumeGuard` + `mixin/LevelFluidGuardMixin`** — 拦截船只体积内的真实流体写入；空气海域下仍保留用于旧存档兼容。
 - **`mixin/ShipBreakMixin`** — 把玩家左键破坏映射到船坞坐标，让物理船也能破口。
-- **`world/OceanEnvironment`** — 干湿判定的唯一入口：维度高度 + 哨站盒子 + 服务端/客户端各自注册的 `DryZone`；不依赖 `FluidState`。
+- **`world/OceanEnvironment`** — 干湿判定的唯一入口：维度高度 + 哨站盒子 + 船内干燥区；客户端和服务端分别保存自己的 `DryZone`（`setClientDryZone` / `setServerDryZone`），不依赖 `FluidState`。
 - **`network/`** — 5 个包：`ShipActionPacket`（客户端→服务端）、`VesselPalettePacket`（船体渲染）、`SonarPingPacket` / `SonarDataPacket`（声纳）、`ShipWaterStatePacket`（水面包）。
 - **`event/`** — `DeepSeaEvents`（登录、命令、自检）、`UnderwaterSurvival`（空气海域的氧气/溺水）。
 
