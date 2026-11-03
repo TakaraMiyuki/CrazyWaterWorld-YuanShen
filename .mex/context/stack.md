@@ -62,7 +62,7 @@ mex:
 
 ## Version Constraints
 
-- **只能用 JDK 17**：`gradle.properties` 用 `org.gradle.java.home` 固定本机 JDK 17 路径；系统 `JAVA_HOME` 指向 21 时构建会失败。
+- **只能用 JDK 17**：构建前把 `JAVA_HOME` 指向 JDK 17；仓库不写死本机路径，需要固定时使用用户级 `~/.gradle/gradle.properties` 的 `org.gradle.java.home`。
 - **Gradle 8.1.1 与 ForgeGradle 6 绑定**：不要升级 wrapper，ForgeGradle 6 不支持更高版本。
 - **VS2 2.4.11 不做方块交互坐标重映射**：物理船上必须用 `sonar_proxy` 代理方块，不能直接右键船坞里的声纳原方块。
 - **1 格 = 1 米**：深海维度高度、深度 HUD 和 HUD 米数换算都按这个比例。

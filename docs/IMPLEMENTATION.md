@@ -729,9 +729,9 @@ cd barotrauma
 
 环境约束（缺一条就构建失败）：
 
-- **必须 JDK 17**：`gradle.properties:12` 用 `org.gradle.java.home` 写死了路径，因为系统 `JAVA_HOME` 可能指向 JDK 21，而 Gradle 8.1.1 + ForgeGradle 6 不支持。
-- **仓库顺序**：阿里云镜像必须在前（`build.gradle:66-94`），本机访问 Maven Central / plugins.gradle.org 会 403。
-- **代理**：`gradle.properties:18-22` 配了 `127.0.0.1:7897`，不用代理时注释掉那 5 行。
+- **必须 JDK 17**：Gradle 8.1.1 + ForgeGradle 6 只支持 JDK 17。构建前把 `JAVA_HOME` 指向 JDK 17；需要固定时写到 `~/.gradle/gradle.properties` 的 `org.gradle.java.home`，仓库不写死本机路径。
+- **仓库顺序**：BMCLAPI/阿里云镜像在前，官方仓库作为回退；按网络环境调整。
+- **代理**：仓库不写死代理；需要时在 `~/.gradle/gradle.properties` 或命令行设置 `systemProp.http.proxyHost/Port`。
 - **`gradle.properties` 里不能写中文**：它按 ISO-8859-1/GBK 解码，中文会以乱码进 `mods.toml`（`gradle.properties:33` 的注释）。
 - VS2 依赖：`compileOnly` + `runtimeOnly`（正式包不打包），`libs/vs2-api-1.1.0.jar` 抽自 VS2 的 jar-in-jar，另需 `kotlin-stdlib` 与 `kotlin-for-forge`（`build.gradle:96-114`）。run 配置必须带 `mixin.env.remapRefMap=true` 和 `refMapRemappingFile`（`:30-33`），否则 VS2 的 SRG 名 mixin 在开发环境直接崩。
 

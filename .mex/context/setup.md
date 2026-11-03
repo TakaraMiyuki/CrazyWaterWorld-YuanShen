@@ -39,19 +39,19 @@ mex:
 
 ## Prerequisites
 
-- **JDK 17** — 本机路径 `C:/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot`，已写入 `gradle.properties` 的 `org.gradle.java.home`；不要用 JDK 21。
-- **Git** — 仓库根为 `D:\zcodeplayground\barotrauma-mc-mod`。
+- **JDK 17** — 构建前把 `JAVA_HOME` 指向 JDK 17；仓库不写死本机路径。需要固定时写到 `~/.gradle/gradle.properties` 的 `org.gradle.java.home`，不要提交。
+- **Git** — 在仓库根目录执行命令。
 - **Windows + PowerShell/Git Bash** — 命令示例以 Gradle wrapper 为准。
-- **可选：本地代理** — 依赖下载走 `127.0.0.1:7899`（自动代理）；直连卸载代理时注释 `gradle.properties` 里的 5 行 `systemProp.*.proxy*`。
+- **可选：本地代理** — 如需代理，在 `~/.gradle/gradle.properties` 或命令行配置；仓库不写死代理地址。
 - **可选：Python + Pillow** — 只有重新生成占位贴图时需要。
 
 ## First-time Setup
 
 1. `git clone https://github.com/opAmber258/barotrauma-mc-mod.git`
-2. 进入仓库，确认 `gradle.properties` 里的 JDK 17 路径适用于本机（换机器时修改 `org.gradle.java.home`）。
+2. 准备 JDK 17；如果系统 `JAVA_HOME` 不是 JDK 17，先切换。
 3. 设置 `JAVA_HOME`（Gradle wrapper 自身需要）：
    ```bash
-   export JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
+   export JAVA_HOME=/path/to/jdk-17
    ```
 4. 首次构建：`./gradlew build --offline`（依赖已缓存时）；没有缓存就去掉 `--offline`，走 BMCLAPI / 阿里云镜像。
 5. 运行客户端：`./gradlew runClient --offline`。
@@ -61,8 +61,8 @@ mex:
 ## Environment Variables
 
 - `JAVA_HOME`（构建时必须）— 指向 JDK 17；Gradle wrapper 用它启动 JVM。
-- `systemProp.http.proxyHost` / `http.proxyPort` / `https.proxyHost` / `https.proxyPort`（可选，已写在 `gradle.properties`）— 本机自动代理 `127.0.0.1:7899`。
-- `systemProp.http.nonProxyHosts`（可选）— `localhost|127.*|[::1]`。
+- `systemProp.http.proxyHost` / `http.proxyPort` / `https.proxyHost` / `https.proxyPort`（可选）— 仓库不写死；需要时写在 `~/.gradle/gradle.properties` 或命令行。
+- `systemProp.http.nonProxyHosts`（可选）— 例如 `localhost|127.*|[::1]`。
 - 没有需要提交的密钥或服务端环境变量；这个模组不连接外部数据库或 API。
 
 ## Common Commands
@@ -77,7 +77,7 @@ mex:
 
 ## Common Issues
 
-**`JAVA_HOME is not set` 或 Gradle 启动到 JDK 21：** 在命令前显式 `export JAVA_HOME=...`；`gradle.properties` 里的 `org.gradle.java.home` 只影响 Gradle 启动的 JVM，不替代 wrapper 的 `JAVA_HOME`。
+**`JAVA_HOME is not set` 或 Gradle 启动到 JDK 21：** 在命令前显式 `export JAVA_HOME=/path/to/jdk-17`；仓库不再设置 `org.gradle.java.home`。
 **Forge/Maven 下载超时或 `zip END header not found`：** 确认 `settings.gradle` 和 `build.gradle` 的 BMCLAPI 仓库在最前面；必要时删掉损坏的缓存文件重下。
 **`run/world` 里还是旧地形：** 世界生成器改动不会回填已生成区块；删除 `run/world` 后重新创建世界。
 **VS2 未安装或类加载崩溃：** 确认模组只在 `ship/vs/` 引用 VS2 类型，`VsSupport.available()` 为 false 时走非物理船路径。

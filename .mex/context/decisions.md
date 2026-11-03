@@ -43,14 +43,14 @@ relations:
     target: mx_01M6FTV797VEN7Z57WW58775G4
     note: Section of decisions in context/decisions.md
 -->
-### 用 MEX 取代 Club v1 协作协议
+### 用 MEX 接管项目协作
 
 **Date:** 2026-11-03
 **Status:** Active
-**Decision:** 项目协作状态从 `club/` 的 Club v1 协议迁移到仓库内 `.mex/` 项目记忆，由 MEX CLI、ZCode 技能和 Hub 管理。
-**Reasoning:** Club v1 只提供纯文本交接，无法检索、链接代码或校验漂移；MEX 提供 Wiki、代码图、Inbox、Relay、Statechart 和本地 GUI，记忆仍随 Git 共享。
-**Alternatives considered:** 继续维护 Club v1（放弃，缺少检索和漂移检查）；把记忆放到外部服务（放弃，破坏 Git 即传输的模型）。
-**Consequences:** `club/` 不再作为协作入口；`.mex/`、`.zcode/skills`、`.zcode/commands` 和根 `AGENTS.md` 的 MEX 指令块成为新的入口。Git 提交/推送仍需要人类单独授权。
+**Decision:** 项目协作状态迁入仓库内 `.mex/` 项目记忆，由 MEX CLI、ZCode 技能和 Hub 管理。
+**Reasoning:** 旧的纯文本交接无法检索、链接代码或校验漂移；MEX 提供 Wiki、代码图、Inbox、Relay、Statechart 和本地 GUI，记忆仍随 Git 共享。
+**Alternatives considered:** 继续维护纯文本交接（放弃，缺少检索和漂移检查）；把记忆放到外部服务（放弃，破坏 Git 即传输的模型）。
+**Consequences:** `.mex/`、`.zcode/skills`、`.zcode/commands` 和根 `AGENTS.md` 的 MEX 指令块成为协作入口；Git 提交/推送仍需要人类单独授权。
 
 <!-- mex:entity
 id: mx_01M6FTV71TC937899A7QJZE20R
@@ -147,21 +147,3 @@ relations:
 **Alternatives considered:** `implementation` 打包 VS2（放弃，分发和合规问题）；硬依赖（放弃，服务器可不装 VS2）。
 **Consequences:** 所有 VS2 调用必须放在 `ship/vs/`；新增 VS2 类型引用时要检查类加载隔离。
 
-<!-- mex:entity
-id: mx_01M6FTV66NJRC3JT6QBDH7VZ6B
-type: decision
-status: promoted
-revision: 2
-relations:
-  - type: refines
-    target: mx_01M6FTV797VEN7Z57WW58775G4
-    note: Section of decisions in context/decisions.md
--->
-### Club v1 初始化（已被 MEX 取代）
-
-**Date:** 2026-11-02
-**Status:** Superseded by “用 MEX 取代 Club v1 协作协议”
-**Decision:** 采用 Club v1，把协作状态收进 `club/`，根目录只留 `AGENTS.md` 指针。
-**Reasoning:** 当时需要一套多人共享的当前交接和决策日志，且只依赖 Git 与纯文本。
-**Alternatives considered:** 继续用 `HANDOFF.md` / `PLAN.md` / `STATUS.md`（保留但未迁移）；引入外部服务（放弃）。
-**Consequences:** `club/latest-<id>.md` 是当时的交接入口；2026-11-03 被 MEX 取代。

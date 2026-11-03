@@ -40,7 +40,7 @@ mex:
 
 1. 设置 JDK：
    ```bash
-   export JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
+   export JAVA_HOME=/path/to/jdk-17
    ```
 2. L1：
    ```bash
@@ -64,7 +64,7 @@ mex:
 
 ## Gotchas
 
-- `JAVA_HOME is not set` 是 wrapper 层错误；只改 `org.gradle.java.home` 不够。
+- `JAVA_HOME is not set` 是 wrapper 层错误；仓库不设置 `org.gradle.java.home`，需要自己把 `JAVA_HOME` 指向 JDK 17。
 - 依赖未缓存时不要加 `--offline`；先联网跑一次，再 offline。
 - 改过 `DeepSeaChunkGenerator` / `OutpostBuilder` / `TrunkNetwork` 后必须删除 `run/world`，否则 L3 还是旧地形。
 - L2 的模板必须放在 `run/gameteststructures/`，放 `src/main/resources` 不会被 1.20.1 GameTest 找到。

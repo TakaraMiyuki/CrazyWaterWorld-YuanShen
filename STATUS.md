@@ -433,7 +433,7 @@ Remove-Item run\.smoketest-vs
 
 ## 查资料的路子
 
-见 `AGENTS.md` §1（Fandom API + 本地代理 7897 + 必须带浏览器 UA）。
+见项目文档（Fandom API + 必需浏览器 UA；代理按本机环境配置）。
 **`Ballast` 页面不存在、`Submarine` 页的 `==Ballast==` 是空段落**，别再重复查。
 
 VS2：模组本体源码克隆在 `_vs2src\`（分支 `1.20.1/main`，
