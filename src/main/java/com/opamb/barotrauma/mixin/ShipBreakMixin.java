@@ -1,12 +1,20 @@
 package com.opamb.barotrauma.mixin;
 
+import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
+import com.opamb.barotrauma.registry.ModShipBlocks;
+import com.opamb.barotrauma.ship.HullDamage;
+import com.opamb.barotrauma.ship.ShipCores;
 import com.opamb.barotrauma.ship.vs.VsState;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerPlayerGameMode;
+import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -40,11 +48,49 @@ public abstract class ShipBreakMixin {
         if (action != ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK) {
             return;
         }
-        if (VsState.tryBreak(player.serverLevel(), player, pos)) {
-            // 原版 destroyAndAck 会回这个 ack；我们整段取消后必须自己回，
-            // 否则客户端的预测破坏一直挂着不被确认（创造模式序列号会一直涨）。
-            player.connection.send(new ClientboundBlockChangedAckPacket(sequence));
-            ci.cancel();
+        if (player.isSpectator()) {
+            return;
         }
+        ServerLevel level = player.serverLevel();
+        if (!level.mayInteract(player, pos)) {
+            return;
+        }
+        // 左键一下 = 一次结构伤害；空手/刀/镐不同，创造蹲下 = 建造模式一击拆。
+        float amount = HullDamage.meleeDamage(player.getMainHandItem(),
+                player.getMainHandItem().isEmpty());
+        if (player.isCreative() && player.isShiftKeyDown()) {
+            amount = 1.0E9F;
+        }
+        // 物理船：世界里是空气，必须先在服务端还原成船坞坐标再扣耐久。
+        if (VsState.tryDamage(level, player, pos, amount)) {
+            ackAndCancel(sequence, ci);
+            return;
+        }
+        BlockState state = level.getBlockState(pos);
+        if (state.is(ModShipBlocks.SONAR.get())) {
+            player.displayClientMessage(Component.translatable("message.barotrauma.hull_sonar")
+                    .withStyle(ChatFormatting.GOLD), true);
+            ackAndCancel(sequence, ci);
+            return;
+        }
+        if (!ModShipBlocks.isRepairableHull(state)) {
+            return;
+        }
+        // 方块船：先扣耐久，0 耐久才真的破块并重扫。
+        if (amount <= 0.0F) {
+            // 焊接工具左键不拆船（它只能右键修）
+            ackAndCancel(sequence, ci);
+            return;
+        }
+        ShipCoreBlockEntity core = ShipCores.nearestCore(level, pos, 64.0D);
+        if (core != null && core.damageBlock(level, pos, amount, player)) {
+            ackAndCancel(sequence, ci);
+        }
+    }
+
+    /** 原版 destroyAndAck 会回这个 ack；整段取消后必须自己回，否则客户端预测破坏一直挂着。 */
+    private void ackAndCancel(int sequence, CallbackInfo ci) {
+        player.connection.send(new ClientboundBlockChangedAckPacket(sequence));
+        ci.cancel();
     }
 }

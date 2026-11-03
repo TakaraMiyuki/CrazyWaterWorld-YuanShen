@@ -42,16 +42,29 @@ public final class VsState {
         void observe(ServerLevel level, BlockPos shipyardPos);
     }
 
-    /** 物理船上砸方块：把玩家看到的世界坐标映射成船坞方块并删除。由 {@link VsPilot} 提供。 */
-    public interface Breaker {
-        boolean tryBreak(ServerLevel level, ServerPlayer player, BlockPos pos);
+    /** 物理船上砸方块：把玩家看到的世界坐标映射成船坞方块并扣耐久。由 {@link VsPilot} 提供。 */
+    public interface Damager {
+        boolean tryDamage(ServerLevel level, ServerPlayer player, BlockPos pos, float amount);
+    }
+
+    /** 物理船上焊接：沿玩家视线找到船壳格并回耐久。由 {@link VsPilot} 提供。 */
+    public interface Repairer {
+        boolean tryRepair(ServerLevel level, ServerPlayer player, float amount);
+    }
+
+    /** 物理船爆炸：按世界坐标对装配快照里的格子扣耐久。由 {@link VsPilot} 提供。 */
+    public interface ExplosionDamager {
+        int damageExplosion(ServerLevel level, net.minecraft.world.phys.Vec3 center,
+                            double radius, float baseAmount);
     }
 
     private static volatile boolean active;
     private static volatile Probe probe;
     private static volatile Control control;
     private static volatile CoreObserver coreObserver;
-    private static volatile Breaker breaker;
+    private static volatile Damager damager;
+    private static volatile Repairer repairer;
+    private static volatile ExplosionDamager explosionDamager;
     private static volatile BlockPos corePos;
     private static volatile ShipState activeState;
     /** 船中心相对装配时刻的整数偏移（格）——拆船时按它把方块铺回世界。 */
@@ -111,9 +124,12 @@ public final class VsState {
      * <p>这两个回调只在真正的 VS2 逻辑里注册；没装 VS2 时它们一直是 null，
      * 方块实体和 mixin 走到这里都是空操作，不会触发 VS2 类加载。</p>
      */
-    public static void install(CoreObserver observer, Breaker newBreaker) {
+    public static void install(CoreObserver observer, Damager newDamager,
+                               Repairer newRepairer, ExplosionDamager newExplosionDamager) {
         coreObserver = observer;
-        breaker = newBreaker;
+        damager = newDamager;
+        repairer = newRepairer;
+        explosionDamager = newExplosionDamager;
     }
 
     /** 物理船核心方块实体在船坞里 tick 时调用。 */
@@ -130,16 +146,43 @@ public final class VsState {
     }
 
     /** 服务器收到"开始破坏方块"时调用；返回 true 表示这一下由物理船接管。 */
-    public static boolean tryBreak(ServerLevel level, ServerPlayer player, BlockPos pos) {
-        Breaker current = breaker;
+    public static boolean tryDamage(ServerLevel level, ServerPlayer player, BlockPos pos, float amount) {
+        Damager current = damager;
         if (!active || current == null || level == null || player == null || pos == null) {
             return false;
         }
         try {
-            return current.tryBreak(level, player, pos);
+            return current.tryDamage(level, player, pos, amount);
         } catch (Throwable ignored) {
             // 映射失败就交回原版，别把玩家卡住
             return false;
+        }
+    }
+
+    /** 焊接工具每 0.1 s 调一次；返回 true 表示确实修到了船壳。 */
+    public static boolean tryRepair(ServerLevel level, ServerPlayer player, float amount) {
+        Repairer current = repairer;
+        if (!active || current == null || level == null || player == null) {
+            return false;
+        }
+        try {
+            return current.tryRepair(level, player, amount);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 爆炸事件调一次；物理船的方块在世界里是空气，只能按快照算。 */
+    public static int damageExplosion(ServerLevel level, net.minecraft.world.phys.Vec3 center,
+                                      double radius, float baseAmount) {
+        ExplosionDamager current = explosionDamager;
+        if (!active || current == null || level == null || center == null) {
+            return 0;
+        }
+        try {
+            return current.damageExplosion(level, center, radius, baseAmount);
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 
@@ -170,6 +213,8 @@ public final class VsState {
         active = false;
         probe = null;
         control = null;
+        // 注意：coreObserver / damager / repairer / explosionDamager 是 VsPilot 类初始化时
+        // 装一次的回调，deactivate 不能清掉——否则同一进程里第二次 launch 后没人接破坏/焊接。
         corePos = null;
         activeState = null;
         offsetX = 0;

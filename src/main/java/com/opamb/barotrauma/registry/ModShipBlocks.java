@@ -1,6 +1,7 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
+import com.opamb.barotrauma.block.HullBlock;
 import com.opamb.barotrauma.block.SonarBlock;
 import com.opamb.barotrauma.block.SonarProxyBlock;
 import net.minecraft.world.level.block.Block;
@@ -27,11 +28,13 @@ public final class ModShipBlocks {
 
     // ---- 船体 ----
     public static final RegistryObject<Block> HULL_GLASS = BLOCKS.register("hull_glass",
-            () -> new Block(BlockBehaviour.Properties.of()
+            () -> new HullBlock(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_LIGHT_BLUE)
                     .strength(0.3F)
                     .sound(SoundType.GLASS)
-                    .noOcclusion()));
+                    .noOcclusion()
+                    .isViewBlocking((state, level, pos) -> !HullBlock.isBreached(state))
+                    .isSuffocating((state, level, pos) -> !HullBlock.isBreached(state))));
 
     /**
      * 测试用透明船壳（调试专用）。
@@ -42,7 +45,7 @@ public final class ModShipBlocks {
      * 初始潜艇的船壳用它造，方便肉眼验证"船和声纳是不是一体的"。</p>
      */
     public static final RegistryObject<Block> TEST_HULL = BLOCKS.register("test_hull",
-            () -> new Block(BlockBehaviour.Properties.of()
+            () -> new HullBlock(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_LIGHT_BLUE)
                     .strength(2.0F)
                     .sound(SoundType.GLASS)
@@ -94,8 +97,11 @@ public final class ModShipBlocks {
         return Machine.NONE;
     }
 
-    /** 对"分舱"而言是否算墙。 */
+    /** 对"分舱"而言是否算墙：breached 的船壳是洞，必须让扫描把它当空气。 */
     public static boolean isSolidForShip(BlockState state) {
+        if (state.getBlock() instanceof HullBlock && HullBlock.isBreached(state)) {
+            return false;
+        }
         return !state.isAir() && state.getFluidState().isEmpty();
     }
 
@@ -106,6 +112,30 @@ public final class ModShipBlocks {
                 || block == TEST_HULL.get()
                 || block == SONAR.get()
                 || block == ModBlocks.SUBMARINE_PLATING.get();
+    }
+
+    /**
+     * 可受损船壳的基础最大血量（原版：外壳 200 / 舷窗 100）。
+     *
+     * <p>声纳是船脑，不参与船壳耐久；内墙在本模组里没有单独方块，暂时和外壳同值。
+     * T1/T2/T3 本身不改变这个值，只限制“船体加固”升级等级（每级 +20%）。</p>
+     */
+    public static float maxHealth(BlockState state) {
+        if (state.is(HULL_GLASS.get())) {
+            return com.opamb.barotrauma.ship.HullDamage.GLASS_MAX_HEALTH;
+        }
+        if (state.is(TEST_HULL.get())) {
+            return com.opamb.barotrauma.ship.HullDamage.TEST_HULL_MAX_HEALTH;
+        }
+        if (state.is(ModBlocks.SUBMARINE_PLATING.get())) {
+            return com.opamb.barotrauma.ship.HullDamage.PLATING_MAX_HEALTH;
+        }
+        return 0.0F;
+    }
+
+    /** 能不能被砸、被焊：声纳和普通方块都不行。 */
+    public static boolean isRepairableHull(BlockState state) {
+        return maxHealth(state) > 0.0F;
     }
 
     private static BlockBehaviour.Properties metal() {

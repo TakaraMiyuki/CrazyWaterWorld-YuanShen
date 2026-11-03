@@ -3,6 +3,7 @@ package com.opamb.barotrauma.registry;
 import com.opamb.barotrauma.BarotraumaMod;
 import com.opamb.barotrauma.item.DivingKnifeItem;
 import com.opamb.barotrauma.item.OxygenTankItem;
+import com.opamb.barotrauma.item.WeldingToolItem;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Tiers;
@@ -27,6 +28,10 @@ public final class ModItems {
     /** 潜水刀：铁剑档位的近战武器。 */
     public static final RegistryObject<Item> DIVING_KNIFE = ITEMS.register("diving_knife",
             () -> new DivingKnifeItem(Tiers.IRON, 2, -2.2F, new Item.Properties()));
+
+    /** 焊接工具：右键持续修船壳，耐久就是燃料（原版燃料罐 200 点，这里放宽到 400）。 */
+    public static final RegistryObject<Item> WELDING_TOOL = ITEMS.register("welding_tool",
+            () -> new WeldingToolItem(new Item.Properties().stacksTo(1).durability(400)));
 
     /** 潜艇装甲板的方块物品。 */
     public static final RegistryObject<Item> SUBMARINE_PLATING =

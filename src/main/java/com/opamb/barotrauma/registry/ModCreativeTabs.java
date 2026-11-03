@@ -24,6 +24,7 @@ public final class ModCreativeTabs {
                     .displayItems((params, output) -> {
                         output.accept(ModItems.OXYGEN_TANK.get());
                         output.accept(ModItems.DIVING_KNIFE.get());
+                        output.accept(ModItems.WELDING_TOOL.get());
                         output.accept(ModItems.SUBMARINE_PLATING.get());
                         output.accept(ModItems.HULL_GLASS.get());
                         output.accept(ModItems.TEST_HULL.get());

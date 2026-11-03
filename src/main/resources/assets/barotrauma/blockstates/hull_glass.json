@@ -1,6 +1,9 @@
 {
   "variants": {
-    "": {
+    "breached=false": {
+      "model": "barotrauma:block/hull_glass"
+    },
+    "breached=true": {
       "model": "barotrauma:block/hull_glass"
     }
   }

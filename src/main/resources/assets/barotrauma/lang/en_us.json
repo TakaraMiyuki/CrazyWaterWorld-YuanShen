@@ -2,11 +2,16 @@
   "itemGroup.barotrauma": "Barotrauma",
   "item.barotrauma.oxygen_tank": "Oxygen Tank",
   "item.barotrauma.diving_knife": "Diving Knife",
+  "item.barotrauma.welding_tool": "Welding Tool",
   "block.barotrauma.submarine_plating": "Submarine Plating",
   "block.barotrauma.hull_glass": "Pressure Hull Glass",
   "block.barotrauma.test_hull": "Test Hull (Transparent)",
   "block.barotrauma.sonar": "Sonar Console",
   "block.barotrauma.station_plating": "Station Plating",
   "tooltip.barotrauma.oxygen_tank": "Right-click to refill your air supply",
-  "tooltip.barotrauma.diving_knife": "Standard issue for divers"
+  "tooltip.barotrauma.diving_knife": "Standard issue for divers",
+  "tooltip.barotrauma.welding_tool": "Hold right-click to weld hull plates",
+  "message.barotrauma.hull_broken": "Hull breached!",
+  "message.barotrauma.hull_sonar": "The sonar is the ship's brain - it can't be removed",
+  "message.barotrauma.welding_empty": "Welding tool out of fuel"
 }

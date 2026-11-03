@@ -378,7 +378,7 @@ public final class ShipWaterRenderer {
         }
     }
 
-    private static ClientShip findClientShip(ClientLevel level, long shipId) {
+    static ClientShip findClientShip(ClientLevel level, long shipId) {
         for (Ship candidate : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipObjectWorld(level).getAllShips()) {
             if (candidate.getId() == shipId && candidate instanceof ClientShip client) {
                 return client;

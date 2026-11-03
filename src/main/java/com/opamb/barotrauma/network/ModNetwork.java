@@ -31,6 +31,8 @@ public final class ModNetwork {
                 SonarDataPacket::encode, SonarDataPacket::decode, SonarDataPacket::handle);
         CHANNEL.registerMessage(nextId++, ShipWaterStatePacket.class,
                 ShipWaterStatePacket::encode, ShipWaterStatePacket::decode, ShipWaterStatePacket::handle);
+        CHANNEL.registerMessage(nextId++, ShipHullDamagePacket.class,
+                ShipHullDamagePacket::encode, ShipHullDamagePacket::decode, ShipHullDamagePacket::handle);
     }
 
     public static <MSG> void sendToAll(MSG message) {

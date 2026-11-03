@@ -1,7 +1,9 @@
 package com.opamb.barotrauma.ship.vs;
 
+import com.opamb.barotrauma.block.HullBlock;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
 import com.opamb.barotrauma.network.ModNetwork;
+import com.opamb.barotrauma.network.ShipHullDamagePacket;
 import com.opamb.barotrauma.network.ShipWaterStatePacket;
 import com.opamb.barotrauma.registry.ModShipBlocks;
 import com.opamb.barotrauma.ship.ShipGeometry;
@@ -16,6 +18,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -104,7 +107,8 @@ public final class VsPilot {
     private static long nextYardScanGameTime = Long.MIN_VALUE;
 
     static {
-        VsState.install(VsPilot::observeCore, VsPilot::tryBreak);
+        VsState.install(VsPilot::observeCore, VsPilot::tryDamage,
+                VsPilot::tryRepair, VsPilot::damageExplosion);
         // 只注册服务端干燥区：单人存档里客户端和集成服务端同进程，
         // 客户端渲染用的 ShipWaterRenderer 不能被这里覆盖（否则方块船舱内会漏滤镜）。
         OceanEnvironment.setServerDryZone(VsPilot::isInsideDryZone);
@@ -424,6 +428,8 @@ public final class VsPilot {
                 if (now != null) {
                     state.simulation().tickSeaFlood(0.1D, Math.max(0.0D, -now.y));
                 }
+                // 还没破块、但伤害 ≥10%/70% 的船壳渗水
+                state.tickLeaks(0.1D);
             } catch (Throwable ignored) {
                 // 模拟出错不影响物理
             }
@@ -752,10 +758,20 @@ public final class VsPilot {
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
                 pos -> ModShipBlocks.isShipBlock(level.getBlockState(pos.offset(ox, oy, oz))), probe);
         current.replaceGeometry(geometry);
+        // breached 方块仍是 ship block，重新装配/重扫后耐久表可能是空的：按 blockstate 补 0%。
+        List<BlockPos> breached = new ArrayList<>();
+        for (Map.Entry<BlockPos, BlockState> entry : snapshot.entrySet()) {
+            if (HullBlock.isBreached(entry.getValue())) {
+                current.hullDamage().setHealth(entry.getKey(), 0.0F);
+                breached.add(entry.getKey());
+            }
+        }
         // 记录连海破口位置：客户端据此在洞口画水束/气泡。内部隔墙的洞会被过滤掉。
         current.addBreaches(broken);
-        // 洞越大进水越快：被砸掉的格数 = 初始船体数 - 当前快照数
-        current.simulation().setBreachSize(Math.max(1, initialShipBlocks - snapshot.size()));
+        current.addBreaches(breached);
+        // 洞越大进水越快：已删除格 + 0% breached 格都算开口。
+        int destroyed = Math.max(0, initialShipBlocks - snapshot.size());
+        current.simulation().setBreachSize(Math.max(1, destroyed + breached.size()));
         // 用"旧的舱内格 + 新的密闭舱室"合并，而不是直接取新 openPockets：
         // 破口舱室会从 compartments 挪到 openPockets，但它的格子在旧集合里，
         // 必须继续挡真实海水；而 openPockets 可能包含船壳外的空气，不能一起保护。
@@ -796,84 +812,306 @@ public final class VsPilot {
     }
 
     /**
-     * 物理船砸方块：玩家看到的是连续渲染的船壳，世界里那一格其实没有方块。
+     * 从玩家眼睛沿视线对装配快照做 AABB 射线检测，返回命中的装配原坐标方块。
      *
-     * <p>所以不能依赖原版的 {@code destroyBlock}。这里从玩家眼睛沿视线对装配快照里的
-     * 船体方块做一次 AABB 射线检测（带船当前的小数位移），命中后把船坞里对应的方块
-     * 删掉，再重扫几何。{@code ShipBreakMixin} 在服务端收到"开始破坏"时调用。</p>
+     * <p>船在世界里是连续渲染的刚体，方块本体在船坞；必须用完整的
+     * {@code worldToShip}（含旋转）把视线变换回装配原坐标，不能只减平移量，
+     * 否则船一转身/倾斜，砸的位置就会偏。</p>
      */
-    private static boolean tryBreak(ServerLevel level, ServerPlayer player, BlockPos packetPos) {
-        if (ship == null || state == null || lastLevel != level || snapshot.isEmpty()) {
-            return false;
+    @Nullable
+    private static BlockPos pickHullBlock(ServerLevel level, ServerPlayer player) {
+        if (ship == null || state == null || snapshot.isEmpty()) {
+            return null;
         }
-        if (yardOffsetX == Integer.MIN_VALUE) {
-            discoverYardOffset(level);
+        ServerShip live = view(level);
+        if (live == null) {
+            return null;
         }
-        if (yardOffsetX == Integer.MIN_VALUE || player.isSpectator()) {
-            return false;
-        }
-        Vec3 now = shipPosition();
-        if (now == null) {
-            return false;
-        }
-        double dx = now.x - assembledPos.x;
-        double dy = now.y - assembledPos.y;
-        double dz = now.z - assembledPos.z;
         Vec3 eye = player.getEyePosition();
         // +1 格余量：客户端创造模式的交互距离和属性值可能差一点，
         // 客户端既然发出了破坏包，说明它已经判定命中了。
         Vec3 end = eye.add(player.getViewVector(1.0F).scale(player.getBlockReach() + 1.0D));
+        org.joml.Matrix4d worldToShip;
+        org.joml.Vector3d origin;
+        try {
+            worldToShip = new org.joml.Matrix4d(live.getTransform().getShipToWorld()).invert();
+            org.joml.Vector3dc positionInShip = live.getTransform().getPositionInShip();
+            origin = new org.joml.Vector3d(
+                    positionInShip.x() - assembledPos.x,
+                    positionInShip.y() - assembledPos.y,
+                    positionInShip.z() - assembledPos.z);
+        } catch (Throwable error) {
+            return null;
+        }
+        org.joml.Vector3d eyeShip = worldToShip.transformPosition(
+                new org.joml.Vector3d(eye.x, eye.y, eye.z), new org.joml.Vector3d()).sub(origin);
+        org.joml.Vector3d endShip = worldToShip.transformPosition(
+                new org.joml.Vector3d(end.x, end.y, end.z), new org.joml.Vector3d()).sub(origin);
+        Vec3 from = new Vec3(eyeShip.x, eyeShip.y, eyeShip.z);
+        Vec3 to = new Vec3(endShip.x, endShip.y, endShip.z);
         BlockPos best = null;
         double bestDistance = Double.MAX_VALUE;
-        for (Map.Entry<BlockPos, BlockState> entry : snapshot.entrySet()) {
-            BlockPos pos = entry.getKey();
-            AABB box = new AABB(
-                    pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz,
-                    pos.getX() + 1.0D + dx, pos.getY() + 1.0D + dy, pos.getZ() + 1.0D + dz);
-            java.util.Optional<Vec3> hit = box.clip(eye, end);
+        for (BlockPos pos : snapshot.keySet()) {
+            java.util.Optional<Vec3> hit = new AABB(pos).clip(from, to);
             if (hit.isEmpty()) {
                 continue;
             }
-            double distance = hit.get().distanceToSqr(eye);
+            double distance = hit.get().distanceToSqr(from);
             if (distance < bestDistance) {
                 bestDistance = distance;
                 best = pos;
             }
         }
         if (best == null) {
-            return false;
+            return null;
         }
-        // 船外还有真实世界方块（地形/哨站）。如果视线先撞到它们，不能隔墙拆船。
+        // 船外还有真实世界方块（地形/哨站）。如果视线先撞到它们，不能隔墙拆/焊船。
         ClipContext clip = new ClipContext(eye, end, ClipContext.Block.COLLIDER,
                 ClipContext.Fluid.NONE, player);
         BlockHitResult worldHit = RaycastUtilsKt.vanillaClip(level, clip);
         if (worldHit.getType() == HitResult.Type.BLOCK
                 && worldHit.getLocation().distanceToSqr(eye) < bestDistance) {
+            return null;
+        }
+        return best;
+    }
+
+    /**
+     * 物理船左键：先扣船壳耐久；0 时方块切成 breached（无碰撞、保留数据），不删除。
+     * {@code ShipBreakMixin} 在服务端收到"开始破坏"时调用。
+     */
+    private static boolean tryDamage(ServerLevel level, ServerPlayer player, BlockPos packetPos, float amount) {
+        if (ship == null || state == null || lastLevel != level || snapshot.isEmpty()
+                || player.isSpectator() || amount <= 0.0F) {
             return false;
         }
-        BlockState removed = snapshot.get(best);
-        if (removed == null) {
+        BlockPos best = pickHullBlock(level, player);
+        if (best == null) {
             return false;
         }
-        if (removed.is(ModShipBlocks.SONAR.get())) {
-            player.displayClientMessage(Component.literal("声纳是船脑，不能拆")
+        BlockState block = snapshot.get(best);
+        if (block == null) {
+            return false;
+        }
+        if (block.is(ModShipBlocks.SONAR.get())) {
+            player.displayClientMessage(Component.translatable("message.barotrauma.hull_sonar")
                     .withStyle(ChatFormatting.GOLD), true);
             return true;
         }
-        level.setBlock(best.offset(yardOffsetX, yardOffsetY, yardOffsetZ),
-                Blocks.AIR.defaultBlockState(), 3);
-        snapshot.remove(best);
-        BlockPos dropPos = BlockPos.containing(best.getX() + 0.5D + dx,
-                best.getY() + 0.5D + dy, best.getZ() + 0.5D + dz);
-        if (!player.isCreative()) {
-            net.minecraft.world.level.block.Block.popResource(level, dropPos,
-                    new ItemStack(removed.getBlock()));
+        float max = state.hullMaxHealth(block);
+        if (max <= 0.0F) {
+            return false;
         }
-        // 世界方块是空气，但 levelEvent 仍然会按传入的方块状态播放破坏粒子和声音
-        level.levelEvent(2001, dropPos, net.minecraft.world.level.block.Block.getId(removed));
-        rebuildGeometry(level, List.of(best));
-        player.displayClientMessage(Component.literal("船体破损！").withStyle(ChatFormatting.RED), true);
+        // 创造模式蹲下 = 建造模式：0% 的 breached 方块直接清掉，普通方块一击打到 0%。
+        if (player.isCreative() && player.isShiftKeyDown() && HullBlock.isBreached(block)) {
+            if (yardOffsetX == Integer.MIN_VALUE) {
+                discoverYardOffset(level);
+            }
+            if (yardOffsetX == Integer.MIN_VALUE) {
+                return false;
+            }
+            state.hullDamage().clear(best);
+            state.removeBreach(best);
+            level.setBlock(best.offset(yardOffsetX, yardOffsetY, yardOffsetZ),
+                    Blocks.AIR.defaultBlockState(), 3);
+            snapshot.remove(best);
+            rebuildGeometry(level, List.of(best));
+            state.removeBreach(best);
+            sendHullDamageState(state);
+            return true;
+        }
+        if (player.isCreative() && player.isShiftKeyDown()) {
+            amount = max * 2.0F;
+        }
+        float health = state.hullDamage().applyDamage(best, amount, max);
+        if (health <= 0.0F) {
+            breachSnapshotBlock(level, player, best, block);
+        } else {
+            Vec3 hitWorld = toWorld(best);
+            level.sendParticles(net.minecraft.core.particles.ParticleTypes.CRIT,
+                    hitWorld.x, hitWorld.y, hitWorld.z,
+                    6, 0.25D, 0.25D, 0.25D, 0.02D);
+            level.playSound(null, BlockPos.containing(hitWorld),
+                    net.minecraft.sounds.SoundEvents.NETHERITE_BLOCK_HIT,
+                    net.minecraft.sounds.SoundSource.PLAYERS, 0.6F, 1.2F);
+            sendHullDamageState(state);
+        }
         return true;
+    }
+
+    /** 物理船右键焊接：沿视线找一格受损船壳并回耐久。 */
+    private static boolean tryRepair(ServerLevel level, ServerPlayer player, float amount) {
+        if (ship == null || state == null || lastLevel != level || snapshot.isEmpty()
+                || player.isSpectator()) {
+            return false;
+        }
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            discoverYardOffset(level);
+        }
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            return false;
+        }
+        BlockPos best = pickHullBlock(level, player);
+        if (best == null) {
+            return false;
+        }
+        BlockState block = snapshot.get(best);
+        if (block == null || block.is(ModShipBlocks.SONAR.get())) {
+            return false;
+        }
+        float max = state.hullMaxHealth(block);
+        if (max <= 0.0F || !state.hullDamage().isDamaged(best)) {
+            return false;
+        }
+        boolean wasBreached = HullBlock.isBreached(block);
+        float health = state.hullDamage().repair(best, amount, max);
+        if (level.getGameTime() % 10L == 0L) {
+            level.playSound(null, BlockPos.containing(toWorld(best)),
+                    net.minecraft.sounds.SoundEvents.FIRE_AMBIENT,
+                    net.minecraft.sounds.SoundSource.PLAYERS, 0.35F, 1.7F);
+        }
+        if (wasBreached && health > 0.0F) {
+            // 焊过 0%：先撤掉破口记录，再恢复船坞方块碰撞并重扫封口。
+            state.removeBreach(best);
+            BlockState restored = block.setValue(HullBlock.BREACHED, false);
+            level.setBlock(best.offset(yardOffsetX, yardOffsetY, yardOffsetZ), restored, 3);
+            snapshot.put(best, restored);
+            rebuildGeometry(level, List.of());
+        }
+        sendHullDamageState(state);
+        return true;
+    }
+
+    /** 把装配快照里的原坐标映射到船当前的世界坐标。 */
+    private static Vec3 toWorld(BlockPos original) {
+        if (ship == null) {
+            return Vec3.atCenterOf(original);
+        }
+        org.joml.Vector3dc positionInShip = ship.getTransform().getPositionInShip();
+        org.joml.Vector3d shipSpace = new org.joml.Vector3d(
+                original.getX() + 0.5D + positionInShip.x() - assembledPos.x,
+                original.getY() + 0.5D + positionInShip.y() - assembledPos.y,
+                original.getZ() + 0.5D + positionInShip.z() - assembledPos.z);
+        org.joml.Vector3d world = ship.getTransform().getShipToWorld()
+                .transformPosition(shipSpace, new org.joml.Vector3d());
+        return new Vec3(world.x, world.y, world.z);
+    }
+
+    /**
+     * 耐久到 0：把船坞方块切成 {@code breached}（无碰撞、不可见、保留数据），不删除、不掉落。
+     * 修回 >0 时 {@link #tryRepair} 会恢复实体并重扫封口。
+     */
+    private static void breachSnapshotBlock(ServerLevel level, @Nullable ServerPlayer player,
+                                            BlockPos original, BlockState block) {
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            discoverYardOffset(level);
+        }
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            return;
+        }
+        if (!(block.getBlock() instanceof HullBlock)) {
+            // 兜底：不是船壳类方块就退回原来的删除逻辑（正常不会走到）。
+            state.hullDamage().clear(original);
+            level.setBlock(original.offset(yardOffsetX, yardOffsetY, yardOffsetZ),
+                    Blocks.AIR.defaultBlockState(), 3);
+            snapshot.remove(original);
+            rebuildGeometry(level, List.of(original));
+            return;
+        }
+        state.hullDamage().setHealth(original, 0.0F);
+        BlockState breached = block.setValue(HullBlock.BREACHED, true);
+        level.setBlock(original.offset(yardOffsetX, yardOffsetY, yardOffsetZ), breached, 3);
+        snapshot.put(original, breached);
+        level.playSound(null, BlockPos.containing(toWorld(original)),
+                net.minecraft.sounds.SoundEvents.NETHERITE_BLOCK_BREAK,
+                net.minecraft.sounds.SoundSource.PLAYERS, 0.8F, 0.9F);
+        rebuildGeometry(level, List.of(original));
+        if (player != null) {
+            player.displayClientMessage(Component.translatable("message.barotrauma.hull_broken")
+                    .withStyle(ChatFormatting.RED), true);
+        }
+        sendHullDamageState(state);
+    }
+
+    /**
+     * 物理船爆炸：方块在世界里是空气，原版爆炸列表根本碰不到它们。
+     * 这里按装配快照逐个映射到世界坐标，按距离衰减扣耐久，最后统一重扫。
+     */
+    private static int damageExplosion(ServerLevel level, Vec3 center, double radius, float baseAmount) {
+        if (ship == null || state == null || lastLevel != level || snapshot.isEmpty()
+                || radius <= 0.0D) {
+            return 0;
+        }
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            discoverYardOffset(level);
+        }
+        if (yardOffsetX == Integer.MIN_VALUE) {
+            return 0;
+        }
+        ServerShip live = view(level);
+        if (live == null) {
+            return 0;
+        }
+        org.joml.Vector3dc positionInShip = live.getTransform().getPositionInShip();
+        org.joml.Vector3d origin = new org.joml.Vector3d(
+                positionInShip.x() - assembledPos.x,
+                positionInShip.y() - assembledPos.y,
+                positionInShip.z() - assembledPos.z);
+        org.joml.Matrix4dc shipToWorld = live.getTransform().getShipToWorld();
+        org.joml.Vector3d blast = new org.joml.Vector3d(center.x, center.y, center.z);
+        List<BlockPos> broken = new ArrayList<>();
+        int hit = 0;
+        for (Map.Entry<BlockPos, BlockState> entry : snapshot.entrySet()) {
+            BlockPos pos = entry.getKey();
+            BlockState block = entry.getValue();
+            if (block.is(ModShipBlocks.SONAR.get())) {
+                continue;
+            }
+            float max = state.hullMaxHealth(block);
+            if (max <= 0.0F) {
+                continue;
+            }
+            org.joml.Vector3d shipSpace = new org.joml.Vector3d(
+                    pos.getX() + 0.5D + origin.x,
+                    pos.getY() + 0.5D + origin.y,
+                    pos.getZ() + 0.5D + origin.z);
+            org.joml.Vector3d world = shipToWorld.transformPosition(shipSpace, new org.joml.Vector3d());
+            double distance = world.distance(blast);
+            if (distance > radius) {
+                continue;
+            }
+            float amount = (float) (baseAmount * (1.0D - distance / radius));
+            if (amount <= 0.0F) {
+                continue;
+            }
+            hit++;
+            if (state.hullDamage().applyDamage(pos, amount, max) <= 0.0F) {
+                broken.add(pos);
+            }
+        }
+        List<BlockPos> breached = new ArrayList<>();
+        for (BlockPos pos : broken) {
+            BlockState block = snapshot.get(pos);
+            if (block != null && block.getBlock() instanceof HullBlock) {
+                state.hullDamage().setHealth(pos, 0.0F);
+                BlockState next = block.setValue(HullBlock.BREACHED, true);
+                level.setBlock(pos.offset(yardOffsetX, yardOffsetY, yardOffsetZ), next, 3);
+                snapshot.put(pos, next);
+                breached.add(pos);
+            } else if (block != null) {
+                state.hullDamage().clear(pos);
+                level.setBlock(pos.offset(yardOffsetX, yardOffsetY, yardOffsetZ),
+                        Blocks.AIR.defaultBlockState(), 3);
+                snapshot.remove(pos);
+            }
+        }
+        if (!breached.isEmpty()) {
+            rebuildGeometry(level, breached);
+        }
+        if (hit > 0) {
+            sendHullDamageState(state);
+        }
+        return hit;
     }
 
     /** 自检用：按原坐标在船坞里拆一格并重扫，验证破口进水链路。 */
@@ -941,12 +1179,25 @@ public final class VsPilot {
                 (float) assembledPos.x, (float) assembledPos.y, (float) assembledPos.z);
         lastWaterPacket = packet;
         ModNetwork.sendToAll(packet);
+        // 船壳耐久和水平同步：同一套 anchor/坐标空间，客户端用同一个 render 变换映射。
+        ModNetwork.sendToAll(ShipHullDamagePacket.build(st, shipId, true,
+                (float) assembledPos.x, (float) assembledPos.y, (float) assembledPos.z));
         if (++waterStateLogCounter % 60L == 0L) {
             LOGGER.info("[vs] 水面同步：船 {}｜密闭舱 {}｜连海 {}｜连海水 {} 单位｜进水 {}%",
                     shipId, st.compartments().size(), st.geometry().openPockets().size(),
                     Math.round(st.simulation().pocketWaterTotal()),
                     Math.round(st.floodRatio() * 100.0D));
         }
+    }
+
+    /** 受击/焊接后立即同步一次船壳耐久（不等下一个水面包）。 */
+    private static void sendHullDamageState(ShipState st) {
+        if (st == null) {
+            return;
+        }
+        long shipId = ship != null ? ship.getId() : -1L;
+        ModNetwork.sendToAll(ShipHullDamagePacket.build(st, shipId, true,
+                (float) assembledPos.x, (float) assembledPos.y, (float) assembledPos.z));
     }
 
     /** 装船成功后登记到 {@link VsState}，让方块那一套知道要停手。 */

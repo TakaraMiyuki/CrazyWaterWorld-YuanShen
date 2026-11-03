@@ -1,14 +1,19 @@
 package com.opamb.barotrauma.ship;
 
+import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 一艘船的运行时状态：几何（舱室）+ 机器统计 + 数值模拟。
@@ -28,6 +33,22 @@ public final class ShipState {
     private final Map<BlockPos, Breach> breaches = new LinkedHashMap<>();
     private ShipSimulation simulation;
     private ShipWater water;
+    /** 逐方块船壳耐久（剩余比例）。重扫/平移/卸船都要跟着走。 */
+    private final HullDamage hullDamage = new HullDamage();
+    /**
+     * 船体加固倍率：原版 {@code increasewallhealth} 每级 +20%。
+     * T1 最多 2 级、T2 4 级、T3 6 级；现在是预留接口，默认 1.0。
+     */
+    private float hullHealthMultiplier = 1.0F;
+
+    /** 10% 伤害开始的小漏：2.1 格³/秒/处（约等于完整破口 35% 的流量）。 */
+    private static final double SMALL_LEAK_UNITS_PER_SECOND = 210.0D;
+    /** 70% 伤害开始的大漏：4.5 格³/秒/处（约等于完整破口 75% 的流量）。 */
+    private static final double BIG_LEAK_UNITS_PER_SECOND = 450.0D;
+    /** 漏水的空间缓存：舱室格 → 舱室下标；以及所有“船内空气格”（含连海空腔）。 */
+    private Map<BlockPos, Integer> leakCompartmentByCell;
+    private Set<BlockPos> leakInsideCells;
+
     private int throttleX;
     private int throttleY;
     private int throttleZ;
@@ -50,6 +71,28 @@ public final class ShipState {
         return geometry;
     }
 
+    public HullDamage hullDamage() {
+        return hullDamage;
+    }
+
+    /** 该方块的最大血量（基础值 × 船体加固倍率）；不可破坏的方块返回 0。 */
+    public float hullMaxHealth(net.minecraft.world.level.block.state.BlockState state) {
+        return com.opamb.barotrauma.registry.ModShipBlocks.maxHealth(state) * hullHealthMultiplier;
+    }
+
+    public float hullHealthMultiplier() {
+        return hullHealthMultiplier;
+    }
+
+    public void setHullHealthMultiplier(float multiplier) {
+        this.hullHealthMultiplier = net.minecraft.util.Mth.clamp(multiplier, 0.25F, 5.0F);
+    }
+
+    /** 这个方块是不是当前船体几何里的一格结构（用于拒绝空气/隔墙上的伤害）。 */
+    public boolean tracksHullBlock(net.minecraft.core.BlockPos pos) {
+        return geometry.hull().contains(pos);
+    }
+
     public MachineCount machines() {
         return machines;
     }
@@ -70,6 +113,10 @@ public final class ShipState {
         double oldSealedWater = old == null ? 0.0D : old.waterUnits();
         double oldPocketWater = old == null ? 0.0D : old.pocketWaterTotal();
         this.geometry = next;
+        // 已经打没的方块不再属于新几何；把它们的耐久记录清掉，客户端不会在空气里画血条。
+        this.hullDamage.retain(next.hull()::contains);
+        this.leakCompartmentByCell = null;
+        this.leakInsideCells = null;
         this.simulation = new ShipSimulation(next, machines);
         this.simulation.copySettingsFrom(old);
         // 连续砸洞时水位不能归零：把旧水量按新几何的容积重新分配
@@ -89,6 +136,22 @@ public final class ShipState {
         return breaches.values();
     }
 
+    /** 方块焊回去之后，把对应破口从列表里移除（否则客户端会在补好的位置继续画水花）。 */
+    public void removeBreaches(Collection<BlockPos> positions) {
+        if (positions == null) {
+            return;
+        }
+        for (BlockPos pos : positions) {
+            breaches.remove(pos);
+        }
+    }
+
+    public void removeBreach(BlockPos pos) {
+        if (pos != null) {
+            breaches.remove(pos);
+        }
+    }
+
     /**
      * 记录新破口。只有落在连海空腔（{@code openPockets}）里的洞才会真正进水，
      * 内部隔墙的洞不记录，避免客户端在舱室中间画错位置。
@@ -100,10 +163,15 @@ public final class ShipState {
         if (positions == null || positions.isEmpty()) {
             return;
         }
-        double[] center = interiorCenter();
         for (BlockPos pos : positions) {
             if (!isSeaConnected(pos) || breaches.containsKey(pos)) {
                 continue;
+            }
+            // 优先用破口所在空腔的质心：整个船的质心可能指向别的密封舱，
+            // 客户端水花/气泡就会朝错方向喷。
+            double[] center = pocketCenter(pos);
+            if (center == null) {
+                center = interiorCenter();
             }
             double dx = center[0] - (pos.getX() + 0.5D);
             double dz = center[1] - (pos.getZ() + 0.5D);
@@ -113,6 +181,27 @@ public final class ShipState {
             BlockPos immutable = pos.immutable();
             breaches.put(immutable, new Breach(immutable, dirX, dirZ));
         }
+    }
+
+    /** 破口所在连海空腔的水平质心；不在任何空腔里返回 null。 */
+    private double[] pocketCenter(BlockPos pos) {
+        for (ShipGeometry.Compartment pocket : geometry.openPockets()) {
+            if (!pocket.cells().contains(pos)) {
+                continue;
+            }
+            double x = 0.0D;
+            double z = 0.0D;
+            long count = 0L;
+            for (BlockPos cell : pocket.cells()) {
+                x += cell.getX() + 0.5D;
+                z += cell.getZ() + 0.5D;
+                count++;
+            }
+            if (count > 0L) {
+                return new double[]{x / count, z / count};
+            }
+        }
+        return null;
     }
 
     /** 密封舱室在水平面上的质心；没有密封舱室时退回整船包围盒中心。 */
@@ -396,6 +485,106 @@ public final class ShipState {
     }
 
     /**
+     * 给客户端水花用的泄漏强度（0 = 不漏，0.35 = 小漏，1 = 大漏/已破口）。
+     *
+     * <p>只对“有一面朝船外、相邻还有密封舱”的受损格返回非零；0% 的 breached
+     * 也返回 1，让客户端继续在洞口喷水花（真正的水量由 tickSeaFlood 管）。</p>
+     */
+    public float leakIntensity(BlockPos pos) {
+        if (pos == null) {
+            return 0.0F;
+        }
+        float health = hullDamage.health(pos);
+        if (health > 0.9F) {
+            return 0.0F;
+        }
+        ensureLeakCache();
+        if (!touchesOutside(pos)) {
+            return 0.0F;
+        }
+        if (health <= 0.0F) {
+            return 1.0F;
+        }
+        if (adjacentCompartment(pos) < 0) {
+            return 0.0F;
+        }
+        return health <= 0.3F ? 1.0F : 0.35F;
+    }
+
+    /**
+     * 船壳渗漏：剩余耐久 90% 以下（伤害 ≥10%）开始小漏，30% 以下（伤害 ≥70%）变大漏。
+     *
+     * <p>0% 不走这里：那会把方块切成 {@code breached}，几何扫描直接把它当空气，
+     * 舱室变成连海空腔，由 {@link ShipSimulation#tickSeaFlood} 按洞口灌水。</p>
+     */
+    public void tickLeaks(double dt) {
+        if (dt <= 0.0D || hullDamage.isEmpty()) {
+            return;
+        }
+        ensureLeakCache();
+        ShipSimulation sim = simulation();
+        for (Map.Entry<BlockPos, Float> entry : hullDamage.entries().entrySet()) {
+            float health = entry.getValue();
+            if (health <= 0.0F || health > 0.9F) {
+                continue;
+            }
+            BlockPos pos = entry.getKey();
+            if (!touchesOutside(pos)) {
+                continue;
+            }
+            int compartment = adjacentCompartment(pos);
+            if (compartment < 0) {
+                continue;
+            }
+            double rate = health <= 0.3F ? BIG_LEAK_UNITS_PER_SECOND
+                    : SMALL_LEAK_UNITS_PER_SECOND;
+            sim.addWater(compartment, rate * dt);
+        }
+    }
+
+    /** 舱室格 → 下标 + 船内空气格集合；几何变化时由 replaceGeometry 清空。 */
+    private void ensureLeakCache() {
+        if (leakCompartmentByCell != null && leakInsideCells != null) {
+            return;
+        }
+        Map<BlockPos, Integer> byCell = new HashMap<>();
+        Set<BlockPos> inside = new HashSet<>();
+        List<ShipGeometry.Compartment> rooms = compartments();
+        for (int i = 0; i < rooms.size(); i++) {
+            for (BlockPos cell : rooms.get(i).cells()) {
+                byCell.put(cell, i);
+                inside.add(cell);
+            }
+        }
+        for (ShipGeometry.Compartment pocket : geometry.openPockets()) {
+            inside.addAll(pocket.cells());
+        }
+        leakCompartmentByCell = byCell;
+        leakInsideCells = inside;
+    }
+
+    /** 这一格船壳是否有一面直接朝船外（既不是船方块，也不是船内空气）。 */
+    private boolean touchesOutside(BlockPos pos) {
+        for (Direction direction : Direction.values()) {
+            BlockPos neighbor = pos.relative(direction);
+            if (!leakInsideCells.contains(neighbor) && !geometry.hull().contains(neighbor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int adjacentCompartment(BlockPos pos) {
+        for (Direction direction : Direction.values()) {
+            Integer index = leakCompartmentByCell.get(pos.relative(direction));
+            if (index != null) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * 平移后的船状态：几何整体偏移，模拟实例原样带过去。
      *
      * <p>船是刚体，挪一格不改变舱室，所以不需要重扫；温度和舱内水位也跟着保留——
@@ -404,6 +593,10 @@ public final class ShipState {
     public ShipState shifted(int dx, int dy, int dz) {
         ShipState next = new ShipState(geometry.shifted(dx, dy, dz), machines);
         next.simulation = this.simulation;
+        // 船壳耐久是逐格记录的，整船平移时必须跟着坐标一起挪。
+        next.hullDamage.copyFrom(this.hullDamage);
+        next.hullDamage.shift(dx, dy, dz);
+        next.hullHealthMultiplier = this.hullHealthMultiplier;
         // 速度/惯性必须跟着船走，否则每挪一格船就"停"一次
         next.physics = this.physics;
         next.throttleX = throttleX;
@@ -476,7 +669,7 @@ public final class ShipState {
         double hitSpeed = Math.abs(physics.speedOn(axis));
         physics.blocked(axis);
         if (hitSpeed > 1.0D) {
-            damageFront(level, dx, dy, dz);
+            damageFront(level, dx, dy, dz, hitSpeed);
         }
         if (axis == 0) {
             throttleX = 0;
@@ -491,23 +684,37 @@ public final class ShipState {
         return corePos;
     }
 
-    /** 撞墙：把迎面的船体方块打掉一格。 */
-    private void damageFront(net.minecraft.server.level.ServerLevel level, int dx, int dy, int dz) {
+    /** 撞墙：迎面船壳按撞击速度扣耐久，0 耐久才破口（不再一击秒掉）。 */
+    private void damageFront(net.minecraft.server.level.ServerLevel level, int dx, int dy, int dz,
+                             double hitSpeed) {
         if (geometry.hull().isEmpty()) {
             return;
         }
         int best = Integer.MIN_VALUE;
         net.minecraft.core.BlockPos target = null;
         for (net.minecraft.core.BlockPos pos : geometry.hull()) {
+            // 声纳是船脑，不能当迎撞面被撞掉
+            if (level.getBlockState(pos).is(com.opamb.barotrauma.registry.ModShipBlocks.SONAR.get())) {
+                continue;
+            }
             int score = pos.getX() * dx + pos.getY() * dy + pos.getZ() * dz;
             if (score > best) {
                 best = score;
                 target = pos;
             }
         }
-        if (target != null) {
-            level.setBlock(target, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+        if (target == null) {
+            return;
         }
+        ShipCoreBlockEntity core = ShipCores.nearestCore(level, target, 64.0D);
+        float amount = (float) (15.0D + hitSpeed * 10.0D);
+        if (core != null) {
+            // 有船核心：只走耐久，0 耐久才由核心破口；不能在这里直接删方块。
+            core.damageBlock(level, target, amount, null);
+            return;
+        }
+        // 没有船核心（老存档/独立结构）才退回直接删除，避免完全失去碰撞破损。
+        level.setBlock(target, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
     }
 
     /** 舱室水位 → 真实水方块。 */

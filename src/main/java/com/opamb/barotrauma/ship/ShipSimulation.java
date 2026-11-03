@@ -351,6 +351,20 @@ public final class ShipSimulation {
         return index >= 0 && index < water.length ? water[index] : 0.0D;
     }
 
+    /**
+     * 往某个密封舱室直接注水（单位）。
+     *
+     * <p>用于“船壳还没破、但已经裂到渗水”的泄漏：这部分水不经过 openPockets
+     * 的海水灌入链路，而是由 {@link ShipState#tickLeaks} 按受损格数量和伤害等级累加。</p>
+     */
+    public void addWater(int compartmentIndex, double units) {
+        if (compartmentIndex < 0 || compartmentIndex >= water.length || units <= 0.0D) {
+            return;
+        }
+        double capacity = volumes[compartmentIndex] * UNITS_PER_BLOCK;
+        water[compartmentIndex] = Math.min(capacity, water[compartmentIndex] + units);
+    }
+
     /** 第 index 个舱室的容积（格）。 */
     public int compartmentVolume(int index) {
         return index >= 0 && index < volumes.length ? volumes[index] : 0;

@@ -2,11 +2,16 @@
   "itemGroup.barotrauma": "潜渊症",
   "item.barotrauma.oxygen_tank": "氧气瓶",
   "item.barotrauma.diving_knife": "潜水刀",
+  "item.barotrauma.welding_tool": "焊接工具",
   "block.barotrauma.submarine_plating": "潜艇装甲板",
   "block.barotrauma.hull_glass": "耐压舷窗",
   "block.barotrauma.test_hull": "试验船壳（透明）",
   "block.barotrauma.sonar": "声纳台",
   "block.barotrauma.station_plating": "站点装甲",
   "tooltip.barotrauma.oxygen_tank": "右键补满氧气",
-  "tooltip.barotrauma.diving_knife": "潜水员标准配发"
+  "tooltip.barotrauma.diving_knife": "潜水员标准配发",
+  "tooltip.barotrauma.welding_tool": "右键持续焊接船壳（消耗燃料）",
+  "message.barotrauma.hull_broken": "船体破损！",
+  "message.barotrauma.hull_sonar": "声纳是船脑，不能拆",
+  "message.barotrauma.welding_empty": "焊接工具燃料耗尽"
 }

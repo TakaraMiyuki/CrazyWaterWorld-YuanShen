@@ -1,6 +1,7 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
+import com.opamb.barotrauma.block.HullBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
@@ -23,11 +24,13 @@ public final class ModBlocks {
 
     /** 潜艇装甲板：高压环境下也不变形的船体钢板。 */
     public static final RegistryObject<Block> SUBMARINE_PLATING = BLOCKS.register("submarine_plating",
-            () -> new Block(BlockBehaviour.Properties.of()
+            () -> new HullBlock(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_GRAY)
                     .strength(25.0F, 1200.0F)
                     .sound(SoundType.NETHERITE_BLOCK)
-                    .requiresCorrectToolForDrops()));
+                    .requiresCorrectToolForDrops()
+                    .isViewBlocking((state, level, pos) -> !HullBlock.isBreached(state))
+                    .isSuffocating((state, level, pos) -> !HullBlock.isBreached(state))));
 
     private ModBlocks() {
     }

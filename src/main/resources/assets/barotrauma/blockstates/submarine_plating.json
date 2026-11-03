@@ -1,6 +1,9 @@
 {
   "variants": {
-    "": {
+    "breached=false": {
+      "model": "barotrauma:block/submarine_plating"
+    },
+    "breached=true": {
       "model": "barotrauma:block/submarine_plating"
     }
   }
