@@ -12,11 +12,14 @@ Minecraft 1.20.1  |  Forge 47.4.0  |  ForgeGradle 6.0.54  |  Gradle 8.1.1  |  JD
 
 | 组件 | 配置 | 说明 |
 | --- | --- | --- |
-| JDK | `C:\Program Files\Java\jdk-17` (17.0.16) | 已在 `gradle.properties` 用 `org.gradle.java.home` 锁死。**系统 `JAVA_HOME` 指向 Zulu 21，不能直接用它跑这个工程** |
+| JDK | 任意 JDK 17 发行版 | Gradle 8.1.1 自身必须跑在 JDK 17 上（`build.gradle` 的 toolchain 只负责编译）。仓库不写死路径：设 `JAVA_HOME`，或在用户级 `~/.gradle/gradle.properties` 写 `org.gradle.java.home` |
 | Gradle | 8.1.1（wrapper 自带） | `gradlew` 会自动使用本地已缓存的发行版 |
-| 依赖镜像 | 阿里云 `https://maven.aliyun.com/repository/public` | 本机访问 `repo.maven.apache.org` 与 `plugins.gradle.org` 会被 **403**，所以 `settings.gradle` 与 `build.gradle` 都把阿里云放在第一位 |
-| 代理 | `127.0.0.1:7897`（Clash Verge） | 已写入 `gradle.properties` 的 `systemProp.http(s).proxyHost`；不用代理时注释掉那 5 行 |
+| 依赖镜像 | 默认标准仓库 | 大陆网络可在用户级 `gradle.properties` 设 `barotrauma.aliyun=true`，把阿里云排到最前 |
+| 代理 | 本机自定 | 放用户级 `~/.gradle/gradle.properties`；仓库不提交代理配置 |
+| VS2 API | 构建时自动抽取 | `extractVs2Api` 从 `vs2_version` 对应的 VS2 jar 的 `META-INF/jars/api-*.jar` 抽出，升级 VS2 不用手工重抽 |
 | Forge 缓存 | `~/.gradle/caches/forge_gradle` 已有 1.20.1-47.4.0 userdev + official 映射 + 资源 | 首次构建省掉大部分下载 |
+
+> 仓库里的 `gradle.properties` 只放项目通用配置。JDK 路径、代理、镜像偏好属于本机环境，放在 `%USERPROFILE%\.gradle\gradle.properties`（Linux/macOS: `~/.gradle/gradle.properties`）。
 
 ## 快速开始
 
@@ -39,15 +42,15 @@ cd barotrauma-mc-mod
 .\gradlew.bat genIntellijRuns
 ```
 
-> 用 IntelliJ IDEA 打开这个目录即可，Gradle 会自动同步；也可以装 IntelliJ 的 **Minecraft Development** 插件补全映射/mixin 支持。
+> 用 IntelliJ IDEA 打开这个目录即可，Gradle JDK 选 17；也可以装 IntelliJ 的 **Minecraft Development** 插件补全映射/mixin 支持。
 
 ## 目录结构
 
 ```
 barotrauma/
 ├─ build.gradle                  ForgeGradle 配置（仓库、run 配置、mods.toml 变量替换）
-├─ settings.gradle               pluginManagement 仓库（阿里云 + Forge maven）
-├─ gradle.properties             JDK 路径、代理、模组元数据、版本号
+├─ settings.gradle               pluginManagement 仓库（默认标准仓库，可用 barotrauma.aliyun 切镜像）
+├─ gradle.properties             模组元数据、版本号；不含本机 JDK/代理
 ├─ tools/gen_textures.py         占位贴图生成脚本（Pillow，可重跑）
 └─ src/main/
    ├─ java/com/opamb/barotrauma/
@@ -114,12 +117,13 @@ ni run\.smoketest -Force
 
 ## 改配置时注意
 
-1. **不要用 JDK 21 跑**。Gradle 8.1.1 + ForgeGradle 6 只支持 JDK 17；换机器时改 `gradle.properties` 里的 `org.gradle.java.home`。
+1. **Gradle 必须用 JDK 17 启动**。Gradle 8.1.1 + ForgeGradle 6 不支持 JDK 21；仓库不写死路径，设 `JAVA_HOME` 或把 `org.gradle.java.home` 放进用户级 `~/.gradle/gradle.properties`。
 2. **`gradle.properties` 的值里不要写中文**。它按 ISO-8859-1/GBK 解码，中文会变成乱码写进 `mods.toml`（已踩过一次，描述改成英文了）。中文只放 `assets/barotrauma/lang/zh_cn.json`。
-3. **`repo.maven.apache.org` / `plugins.gradle.org` 在本机返回 403**。加新依赖时，仓库顺序保持阿里云在前；别把 `mavenCentral()` 放回去。
-4. **首次 `runClient` 需要联网下载原版资源**，走代理会慢；`gradle.properties` 里已放宽 `HttpURLConnection` 超时。
+3. **默认仓库是标准 Maven/Gradle Portal**。如果所在网络访问不了，在用户级 `gradle.properties` 设 `barotrauma.aliyun=true`，不要改仓库里的默认顺序。
+4. **首次 `runClient` 需要联网下载原版资源**，走代理会慢；项目里已放宽 `HttpURLConnection` 超时。
 5. **换模组 id 时**要同时改：`gradle.properties` 的 `mod_id`、Java 包名与 `BarotraumaMod.MOD_ID`、`assets/` 与 `data/` 下的命名空间目录、所有 json 里的 `barotrauma:` 前缀。
 6. 改完 `build.gradle` / `settings.gradle` 记得刷新 Gradle 项目。
+7. **VS2 API 由 `extractVs2Api` 自动抽取**。如果 IDE 报找不到 `org.valkyrienskies.core.api`，先跑一次 `gradlew extractVs2Api` 再刷新 Gradle；升级 `vs2_version` 后不需要手工替换 jar。
 
 ## 下一步可以做的（按《潜渊症》还原度排序）
 

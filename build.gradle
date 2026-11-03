@@ -9,6 +9,8 @@ plugins {
 version = mod_version
 group = mod_group_id
 
+def aliyunFirst = providers.gradleProperty('barotrauma.aliyun').getOrElse('false').toBoolean()
+
 base {
     archivesName = mod_id
 }
@@ -68,10 +70,15 @@ sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
     mavenLocal()
-    // 阿里云镜像放在最前：本机访问 Maven Central 会被 403。
-    maven {
-        name = 'AliyunPublic'
-        url = 'https://maven.aliyun.com/repository/public'
+    // 默认标准仓库；大陆网络在用户级 gradle.properties 设置
+    // barotrauma.aliyun=true，把阿里云镜像放到最前。
+    if (aliyunFirst) {
+        maven {
+            name = 'AliyunPublic'
+            url = 'https://maven.aliyun.com/repository/public'
+        }
+    } else {
+        mavenCentral()
     }
     maven {
         name = 'MinecraftForge'
@@ -90,9 +97,12 @@ repositories {
         name = 'Modrinth'
         url = 'https://api.modrinth.com/maven'
     }
-    flatDir {
-        name = 'localMods'
-        dirs "$rootDir/libs"
+}
+
+configurations {
+    // 只用来从 VS2 的 jar-in-jar 里抽 API；不参与运行/打包。
+    vs2ApiSource {
+        transitive = false
     }
 }
 
@@ -105,9 +115,11 @@ dependencies {
     // 物理引擎：VS2 提供船的刚体运动/碰撞/质量。
     // 正式包不打包 VS2（LGPL-3.0 的常规用法），但开发期要装上来跑 —— 所以要 runtimeOnly。
     // vs-core 的 API 在 VS2 的 jar-in-jar 里（META-INF/jars/api-*.jar），FG 不会自动摊到
-    // 编译期 classpath 上，所以从里面抽出来放在 libs/ 单独引用。
+    // 编译期 classpath 上；构建时用 extractVs2Api 从 vs2_version 对应的 jar 里自动抽出，
+    // 不再提交一份会与 vs2_version 漂移的手工 jar。
     compileOnly fg.deobf("maven.modrinth:valkyrien-skies:${vs2_version}")
-    compileOnly files('libs/vs2-api-1.1.0.jar')
+    compileOnly files("$buildDir/vs2-api/vs2-api.jar")
+    vs2ApiSource "maven.modrinth:valkyrien-skies:${vs2_version}"
     // VS2 的 API 接口继承了 Kotlin 集合类型（QueryableShipData : KMappedMarker），
     // 编译期必须能看见 kotlin-stdlib，否则用不了 getLoadedShips()。
     compileOnly "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"
@@ -120,6 +132,28 @@ dependencies {
     // 纯计算类，能在没有 Minecraft 引导的情况下跑，所以放 JUnit Jupiter。
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// 从 VS2 的 jar-in-jar 里抽出 vs-core API。升级 vs2_version 后会自动跟着变，
+// 不需要再手工从 META-INF/jars/api-*.jar 里复制一份提交进仓库。
+def vs2ApiDir = layout.buildDirectory.dir('vs2-api')
+tasks.register('extractVs2Api', Copy) {
+    from({ zipTree(configurations.vs2ApiSource.singleFile) }) {
+        include 'META-INF/jars/api-*.jar'
+        eachFile { it.path = 'vs2-api.jar' }
+        includeEmptyDirs = false
+    }
+    into vs2ApiDir
+    doLast {
+        def jar = vs2ApiDir.get().file('vs2-api.jar').asFile
+        if (!jar.exists()) {
+            throw new GradleException("VS2 API jar not found; check vs2_version and the jar-in-jar layout")
+        }
+    }
+}
+
+tasks.named('compileJava').configure {
+    dependsOn tasks.named('extractVs2Api')
 }
 
 tasks.named('processResources', ProcessResources).configure {

@@ -1,13 +1,19 @@
 pluginManagement {
     repositories {
-        // 国内镜像优先：repo.maven.apache.org 与 plugins.gradle.org 在本机返回 403。
-        maven {
-            name = 'AliyunPublic'
-            url = 'https://maven.aliyun.com/repository/public'
-        }
-        maven {
-            name = 'AliyunGradlePlugin'
-            url = 'https://maven.aliyun.com/repository/gradle-plugin'
+        // 默认使用标准仓库；大陆网络在用户级 gradle.properties 设置
+        // barotrauma.aliyun=true，可把阿里云镜像放到最前。
+        if (settings.providers.gradleProperty('barotrauma.aliyun').getOrElse('false').toBoolean()) {
+            maven {
+                name = 'AliyunPublic'
+                url = 'https://maven.aliyun.com/repository/public'
+            }
+            maven {
+                name = 'AliyunGradlePlugin'
+                url = 'https://maven.aliyun.com/repository/gradle-plugin'
+            }
+        } else {
+            gradlePluginPortal()
+            mavenCentral()
         }
         // ForgeGradle 插件本体与 Forge 依赖走这里。
         maven {
