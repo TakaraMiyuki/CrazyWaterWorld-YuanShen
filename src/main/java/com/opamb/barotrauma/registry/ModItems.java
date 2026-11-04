@@ -43,6 +43,9 @@ public final class ModItems {
     public static final RegistryObject<Item> TEST_HULL = blockItem("test_hull", ModShipBlocks.TEST_HULL);
     public static final RegistryObject<Item> SONAR = blockItem("sonar", ModShipBlocks.SONAR);
     public static final RegistryObject<Item> STATION_PLATING = blockItem("station_plating", ModShipBlocks.STATION_PLATING);
+    public static final RegistryObject<Item> HATCH = blockItem("hatch", ModShipBlocks.HATCH);
+    public static final RegistryObject<Item> BULKHEAD_DOOR =
+            blockItem("bulkhead_door", ModShipBlocks.BULKHEAD_DOOR);
 
     /** 排水泵方块物品。 */
     public static final RegistryObject<Item> DRAIN_PUMP = blockItem("drain_pump", ModBlocks.DRAIN_PUMP);

@@ -6,6 +6,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -112,6 +113,9 @@ public final class ShipState {
         ShipSimulation old = this.simulation;
         double oldSealedWater = old == null ? 0.0D : old.waterUnits();
         double oldPocketWater = old == null ? 0.0D : old.pocketWaterTotal();
+        // 先按"每格的水"把旧水收下来，再换几何；直接按容积比例重分会让关门的
+        // 那一瞬间水整体跑到漏水侧（用户实测：完好侧被清空）。
+        Map<BlockPos, Double> carried = old == null ? Map.of() : waterByCell();
         this.geometry = next;
         // 已经打没的方块不再属于新几何；把它们的耐久记录清掉，客户端不会在空气里画血条。
         this.hullDamage.retain(next.hull()::contains);
@@ -119,10 +123,92 @@ public final class ShipState {
         this.leakInsideCells = null;
         this.simulation = new ShipSimulation(next, machines);
         this.simulation.copySettingsFrom(old);
-        // 连续砸洞时水位不能归零：把旧水量按新几何的容积重新分配
-        this.simulation.seedWater(oldSealedWater, oldPocketWater);
+        // 连续砸洞时水位不能归零：旧水量按格子搬进新几何（并舱/拆舱都守恒）。
+        if (carried.isEmpty()) {
+            this.simulation.seedWater(oldSealedWater, oldPocketWater);
+        } else {
+            this.simulation.seedWaterByCell(carried, next);
+        }
         this.water = null;
     }
+
+    /**
+     * 当前每个格子里的水量（单位）。重扫/换几何前用它把水"按位置"保存下来。
+     *
+     * <p>密闭舱室是一个整水面；连海空腔按破口源做逐列水位（和客户端渲染同一套），
+     * 所以搬完之后每一侧还是原来的高度，不会凭空均摊。</p>
+     */
+    public Map<BlockPos, Double> waterByCell() {
+        Map<BlockPos, Double> out = new HashMap<>();
+        ShipSimulation sim = this.simulation;
+        if (sim == null) {
+            return out;
+        }
+        List<ShipGeometry.Compartment> sealed = geometry.compartments();
+        for (int i = 0; i < sealed.size(); i++) {
+            double units = sim.waterUnits(i);
+            if (units <= 1.0E-6D) {
+                continue;
+            }
+            addCellsBelow(out, sealed.get(i).cells(),
+                    ShipWaterStateBuilder.surfaceOf(sealed.get(i), units));
+        }
+        List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        for (int j = 0; j < pockets.size(); j++) {
+            double units = sim.pocketWater(j);
+            if (units <= 1.0E-6D) {
+                continue;
+            }
+            List<BlockPos> sources = new ArrayList<>();
+            for (Breach breach : breaches.values()) {
+                if (pockets.get(j).cells().contains(breach.pos())) {
+                    sources.add(breach.pos());
+                }
+            }
+            ShipPocketWater.Shape shape = sources.isEmpty() ? null
+                    : ShipPocketWater.compute(pockets.get(j).cells(), sources, units);
+            if (shape != null && !shape.columns().isEmpty()) {
+                for (BlockPos cell : pockets.get(j).cells()) {
+                    float level = shape.levelAt(cell.getX(), cell.getZ());
+                    if (Float.isNaN(level)) {
+                        continue;
+                    }
+                    mergeCell(out, cell, level);
+                }
+            } else {
+                addCellsBelow(out, pockets.get(j).cells(),
+                        ShipWaterStateBuilder.surfaceOf(pockets.get(j), units));
+            }
+        }
+        return out;
+    }
+
+    private static void addCellsBelow(Map<BlockPos, Double> out, java.util.Collection<BlockPos> cells,
+                                      float level) {
+        for (BlockPos cell : cells) {
+            mergeCell(out, cell, level);
+        }
+    }
+
+    private static void mergeCell(Map<BlockPos, Double> out, BlockPos cell, float level) {
+        double depth = Math.min(1.0D, Math.max(0.0D, level - cell.getY()));
+        if (depth > 0.0D) {
+            out.merge(cell, depth * ShipSimulation.UNITS_PER_BLOCK, Double::sum);
+        }
+    }
+
+    /** 方块船重扫会新建一个 {@link ShipState}：把旧船的水（按格子）和设置接过来。 */
+    public void inheritWaterFrom(ShipState previous) {
+        if (previous == null) {
+            return;
+        }
+        simulation().copySettingsFrom(previous.simulation);
+        Map<BlockPos, Double> carried = previous.waterByCell();
+        if (!carried.isEmpty()) {
+            simulation().seedWaterByCell(carried, geometry);
+        }
+    }
+
 
     public ShipSimulation simulation() {
         if (simulation == null) {

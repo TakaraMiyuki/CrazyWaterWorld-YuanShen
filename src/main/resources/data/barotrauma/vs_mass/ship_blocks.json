@@ -28,5 +28,17 @@
     "mass": 300.0,
     "friction": 0.3,
     "elasticity": 0.02
+  },
+  {
+    "block": "barotrauma:hatch",
+    "mass": 500.0,
+    "friction": 0.25,
+    "elasticity": 0.02
+  },
+  {
+    "block": "barotrauma:bulkhead_door",
+    "mass": 650.0,
+    "friction": 0.25,
+    "elasticity": 0.02
   }
 ]

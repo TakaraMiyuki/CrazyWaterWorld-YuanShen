@@ -107,6 +107,8 @@ public class ShipCoreBlockEntity extends BlockEntity {
             be.state.simulation().tickSeaFlood(0.1D, -pos.getY());
             // 还没破块、但伤害 ≥10%/70% 的船壳渗水
             be.state.tickLeaks(0.1D);
+            // 开着的门：两侧水位不一样时按限速慢慢流，不做瞬间均摊
+            be.state.simulation().tickDoorFlow(0.1D);
             // 方块船移动已关闭（用户实测"方块船太烂：移动时找不到声纳、乱闪"）。
             // 主路径是 VS2 物理船（`/barotrauma ship vs launch`）。代码保留，以后做
             // "服务端整格 + 客户端插值"的自研移动层时再启用。
@@ -376,6 +378,16 @@ public class ShipCoreBlockEntity extends BlockEntity {
             public boolean isWater(BlockPos pos) {
                 return level.getBlockState(pos).getFluidState().is(FluidTags.WATER);
             }
+
+            @Override
+            public boolean isDoorway(BlockPos pos) {
+                return ModShipBlocks.isDoorway(level.getBlockState(pos));
+            }
+
+            @Override
+            public boolean isOpenDoorway(BlockPos pos) {
+                return ModShipBlocks.isOpenDoorway(level.getBlockState(pos));
+            }
         };
         ShipGeometry.Result geometry = ShipGeometry.scanShip(corePos, RADIUS,
                 pos -> ModShipBlocks.isShipBlock(level.getBlockState(pos)), probe);
@@ -399,6 +411,8 @@ public class ShipCoreBlockEntity extends BlockEntity {
             state.hullDamage().copyFrom(previous.hullDamage());
             state.setHullHealthMultiplier(previous.hullHealthMultiplier());
             state.hullDamage().retain(pos -> ModShipBlocks.isRepairableHull(level.getBlockState(pos)));
+            // 开合门也会重扫：水量必须按格子搬过来，否则一关门水就全跑到漏水侧。
+            state.inheritWaterFrom(previous);
         } else if (pendingDamage != null) {
             // 世界重开后的第一次重扫：把区块 NBT 里存下来的耐久接回来，
             // 否则 10%~90% 的部分损伤会全部凭空满血。

@@ -30,6 +30,8 @@ public final class ModCreativeTabs {
                         output.accept(ModItems.TEST_HULL.get());
                         output.accept(ModItems.SONAR.get());
                         output.accept(ModItems.STATION_PLATING.get());
+                        output.accept(ModItems.HATCH.get());
+                        output.accept(ModItems.BULKHEAD_DOOR.get());
                         output.accept(ModItems.DRAIN_PUMP.get());
                     })
                     .build());

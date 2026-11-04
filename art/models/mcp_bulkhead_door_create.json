@@ -1,0 +1,11 @@
+{
+  "file": "bulkhead_door.bbmodel",
+  "format": "bedrock",
+  "name": "bulkhead_door",
+  "box_uv": false,
+  "resolution": {
+    "width": 64,
+    "height": 64
+  },
+  "overwrite": true
+}

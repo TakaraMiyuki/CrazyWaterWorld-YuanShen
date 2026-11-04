@@ -26,7 +26,19 @@ public final class ClientSetup {
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
-            OceanEnvironment.setClientDryZone(ShipWaterRenderer::isInsideDryZone);
+            OceanEnvironment.setClientDryZone(new OceanEnvironment.DryZone() {
+                @Override
+                public boolean isDry(net.minecraft.world.level.Level level,
+                                     net.minecraft.world.phys.Vec3 pos) {
+                    return ShipWaterRenderer.isInsideDryZone(level, pos);
+                }
+
+                @Override
+                public boolean isInsideCompartment(net.minecraft.world.level.Level level,
+                                                   net.minecraft.world.phys.Vec3 pos) {
+                    return ShipWaterRenderer.isInsideCompartment(level, pos);
+                }
+            });
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.HULL_GLASS.get(), RenderType.cutout());
             // 测试船壳要真的透过去看见里面，cutout 只有全透明/全不透明两态，不够
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.TEST_HULL.get(), RenderType.translucent());
@@ -48,6 +60,9 @@ public final class ClientSetup {
     @SubscribeEvent
     public static void onRegisterRenderers(EntityRenderersEvent.RegisterRenderers event) {
         event.registerBlockEntityRenderer(ModBlockEntities.SONAR.get(), SonarRenderer::new);
+        event.registerBlockEntityRenderer(ModBlockEntities.HATCH.get(), context -> new HatchRenderer());
+        event.registerBlockEntityRenderer(ModBlockEntities.BULKHEAD_DOOR.get(),
+                context -> new BulkheadDoorRenderer());
         event.registerEntityRenderer(com.opamb.barotrauma.registry.ModEntities.VESSEL.get(), VesselRenderer::new);
     }
 }

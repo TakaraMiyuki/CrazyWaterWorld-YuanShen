@@ -111,9 +111,20 @@ public final class VsPilot {
     static {
         VsState.install(VsPilot::observeCore, VsPilot::tryDamage,
                 VsPilot::tryRepair, VsPilot::damageExplosion);
+        VsState.installGeometryRefresh(VsPilot::refreshPhysicalGeometry);
         // 只注册服务端干燥区：单人存档里客户端和集成服务端同进程，
         // 客户端渲染用的 ShipWaterRenderer 不能被这里覆盖（否则方块船舱内会漏滤镜）。
-        OceanEnvironment.setServerDryZone(VsPilot::isInsideDryZone);
+        OceanEnvironment.setServerDryZone(new OceanEnvironment.DryZone() {
+            @Override
+            public boolean isDry(Level level, Vec3 pos) {
+                return VsPilot.isInsideDryZone(level, pos);
+            }
+
+            @Override
+            public boolean isInsideCompartment(Level level, Vec3 pos) {
+                return VsPilot.isInsideCompartment(level, pos);
+            }
+        });
     }
 
     /** 装配刚完成时 VS2 可能还没把这艘船标成"已加载"，推进器先挂在这里，下一 tick 再试。 */
@@ -317,6 +328,28 @@ public final class VsPilot {
         return managing != null && managing.getId() == ship.getId();
     }
 
+    /** 这个位置是不是在某个物理船舱的盒子里（不管进没进水）。 */
+    public static boolean isInsideCompartment(Level level, Vec3 pos) {
+        if (ship == null || state == null || level == null || pos == null) {
+            return false;
+        }
+        float[] boxes = lastWaterPacket.boxes();
+        if (boxes.length < 7) {
+            return false;
+        }
+        double lx = pos.x - VsState.offsetX();
+        double ly = pos.y - VsState.offsetY();
+        double lz = pos.z - VsState.offsetZ();
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            if (lx >= boxes[i] && lx <= boxes[i + 3] + 1.0F
+                    && ly >= boxes[i + 1] && ly <= boxes[i + 4] + 1.0F
+                    && lz >= boxes[i + 2] && lz <= boxes[i + 5] + 1.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * 玩家/实体是否在“未进水的船舱”里。
      *
@@ -344,10 +377,11 @@ public final class VsPilot {
             float maxY = boxes[i + 4] + 1.0F;
             float maxZ = boxes[i + 5] + 1.0F;
             float surface = boxes[i + 6];
+            boolean dryBox = surface <= minY + 0.01F;
             if (lx >= minX && lx <= maxX
                     && ly >= minY && ly <= maxY
                     && lz >= minZ && lz <= maxZ
-                    && ly > surface + 0.01F) {
+                    && (dryBox || ly > surface + 0.01F)) {
                 return true;
             }
         }
@@ -432,6 +466,8 @@ public final class VsPilot {
                 }
                 // 还没破块、但伤害 ≥10%/70% 的船壳渗水
                 state.tickLeaks(0.1D);
+                // 开着的门：两侧水位不一样时按限速慢慢流，不做瞬间均摊
+                state.simulation().tickDoorFlow(0.1D);
             } catch (Throwable ignored) {
                 // 模拟出错不影响物理
             }
@@ -716,6 +752,22 @@ public final class VsPilot {
      * <p>物理船上砸方块由 {@link #tryBreak} 直接处理；这里兜的是爆炸、命令、
      * 其它 mod 等旁路修改。破口会让舱室从"密闭"变成"连海"，模拟里开始进水。</p>
      */
+    /** 门开合后强制重扫船坞几何；方块类型没变，{@link #refreshHull} 不会触发。 */
+    private static void refreshPhysicalGeometry(ServerLevel level) {
+        rebuildGeometry(level, List.of());
+    }
+
+    /**
+     * 船坞坐标 → 装配坐标。物理船的方块实体（排水泵等）报上来的是船坞里的格子，
+     * 而船状态里的舱室、破口全是装配坐标。
+     */
+    public static BlockPos toAssembly(BlockPos yardPos) {
+        if (yardPos == null || yardOffsetX == Integer.MIN_VALUE) {
+            return yardPos;
+        }
+        return yardPos.offset(-yardOffsetX, -yardOffsetY, -yardOffsetZ);
+    }
+
     private static void refreshHull(ServerLevel level) {
         ShipState current = state;
         if (current == null || snapshot.isEmpty() || yardOffsetX == Integer.MIN_VALUE) {
@@ -770,6 +822,16 @@ public final class VsPilot {
             public boolean isWater(BlockPos pos) {
                 // 船坞区块里是船体方块本身，没有海水；进水是模拟量
                 return false;
+            }
+
+            @Override
+            public boolean isDoorway(BlockPos pos) {
+                return ModShipBlocks.isDoorway(level.getBlockState(pos.offset(ox, oy, oz)));
+            }
+
+            @Override
+            public boolean isOpenDoorway(BlockPos pos) {
+                return ModShipBlocks.isOpenDoorway(level.getBlockState(pos.offset(ox, oy, oz)));
             }
         };
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
@@ -1771,6 +1833,18 @@ public final class VsPilot {
             @Override
             public boolean isWater(BlockPos pos) {
                 return false;
+            }
+
+            @Override
+            public boolean isDoorway(BlockPos pos) {
+                BlockState blockState = snap.get(pos);
+                return blockState != null && ModShipBlocks.isDoorway(blockState);
+            }
+
+            @Override
+            public boolean isOpenDoorway(BlockPos pos) {
+                BlockState blockState = snap.get(pos);
+                return blockState != null && ModShipBlocks.isOpenDoorway(blockState);
             }
         };
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,

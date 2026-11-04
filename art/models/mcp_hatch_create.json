@@ -1,0 +1,11 @@
+{
+  "file": "hatch.bbmodel",
+  "format": "bedrock",
+  "name": "hatch",
+  "box_uv": false,
+  "resolution": {
+    "width": 64,
+    "height": 64
+  },
+  "overwrite": true
+}
