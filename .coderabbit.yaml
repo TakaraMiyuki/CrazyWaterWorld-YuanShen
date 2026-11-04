@@ -1,0 +1,64 @@
+# CodeRabbit 配置 — barotrauma（Minecraft 1.20.1 Forge 模组）
+# 参考：https://docs.coderabbit.ai/reference/configuration
+# 原则：只做 PR 审查与评论，不改代码、不参与合并决定（合并权在维护者）。
+
+language: zh-CN
+
+tone_instructions: >
+  评审意见用简洁中文，只指出真正的问题（bug、隐患、遗漏的测试、与项目约定冲突）。
+  不要客套和夸奖；风格类意见降为次要。
+
+reviews:
+  # quiet / chill / assertive。chill = 少而准，觉得太松再换 assertive。
+  profile: chill
+  high_level_summary: true
+  poem: false
+
+  path_filters:
+    # MEX 的活动/操作日志是自动生成的，审了没意义
+    - "!.mex/events/**"
+    # 构建产物/旧导出目录
+    - "!export/**"
+    - "!club/**"
+    - "!**/*.jar"
+    # 客户端/服务端运行目录（正常不会进 PR，保险起见）
+    - "!run/**"
+    - "!run-client/**"
+    - "!build/**"
+
+  path_instructions:
+    - path: "src/main/java/**"
+      instructions: |
+        这是 Minecraft 1.20.1 Forge 模组（ForgeGradle 6、Java 17），不是 Fabric、不是 1.21+。
+        请按项目约定检查：
+        - 服务端权威：船体几何、水量、推进、干湿判定都在服务端；客户端只发输入、只渲染。
+        - Valkyrien Skies 2（VS2）类型只能出现在 ship/vs/ 包内，且不得打包进模组 jar。
+        - 深海维度是刻意设计的"空气海域"：不要往世界里放真实水方块（Blocks.WATER）。
+        - 网络包必须按 ModNetwork 现有的 1.20.1 SimpleChannel 注册方式，并在两端保持一致。
+        - 涉及 Mixin 时注意生产环境需要 refmap（barotrauma.refmap.json）；不要依赖只在开发环境
+          存在的 SRG/MCP 名字，@Shadow 字段要确认 refmap 里有映射。
+        - 船壳耐久相关：0% 是 HullBlock.BREACHED（保留方块、无碰撞），不要改成删除方块。
+    - path: "src/main/resources/**"
+      instructions: |
+        Minecraft 1.20.1 资源文件：blockstates/models 的 JSON 必须是 1.20.1 格式；
+        新增文本键时 zh_cn.json 和 en_us.json 要同时更新；贴图名不要带 textures/ 前缀以外的多余路径。
+    - path: "src/test/java/**"
+      instructions: |
+        JUnit 5 纯逻辑单测，不依赖世界/注册表启动；涉及随机时用固定种子。
+
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "[WIP]"
+      - "DRAFT"
+
+  pre_merge_checks:
+    title:
+      mode: warning
+    description:
+      mode: warning
+
+chat:
+  auto_reply: true
