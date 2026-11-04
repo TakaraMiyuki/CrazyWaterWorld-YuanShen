@@ -1,6 +1,7 @@
 package com.opamb.barotrauma.ship;
 
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
+import com.opamb.barotrauma.network.ShipWaterStatePacket;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -48,6 +49,16 @@ public final class ShipState {
     /** 漏水的空间缓存：舱室格 → 舱室下标；以及所有“船内空气格”（含连海空腔）。 */
     private Map<BlockPos, Integer> leakCompartmentByCell;
     private Set<BlockPos> leakInsideCells;
+
+    /**
+     * 水面包缓存（{@code shipId=-1}、方块船形态）。
+     *
+     * <p>干燥区判定每 tick 每个玩家都要问一次“我在船舱里吗”，原来每次都重新
+     * {@link ShipWaterStateBuilder#build}——里面要跑贪心矩形分解和连海空腔的 64 轮松弛，
+     * 属于纯重复劳动。这里按游戏刻缓存，同一 tick 内无论多少个玩家都只算一次。</p>
+     */
+    private ShipWaterStatePacket waterBoxCache;
+    private long waterBoxCacheTick = Long.MIN_VALUE;
 
     private int throttleX;
     private int throttleY;
@@ -117,6 +128,8 @@ public final class ShipState {
         this.hullDamage.retain(next.hull()::contains);
         this.leakCompartmentByCell = null;
         this.leakInsideCells = null;
+        this.waterBoxCache = null;
+        this.waterBoxCacheTick = Long.MIN_VALUE;
         this.simulation = new ShipSimulation(next, machines);
         this.simulation.copySettingsFrom(old);
         // 连续砸洞时水位不能归零：把旧水量按新几何的容积重新分配
@@ -129,6 +142,25 @@ public final class ShipState {
             simulation = new ShipSimulation(geometry, machines);
         }
         return simulation;
+    }
+
+    /**
+     * 当前游戏刻的水面包（方块船形态），同一 tick 内复用。
+     *
+     * <p>干燥区判定每个玩家每 tick 都要用一次，而 {@code ShipWaterStateBuilder.build}
+     * 里有贪心矩形分解和连海空腔松弛，代价远高于一次包围盒判定。这里按 tick 缓存：
+     * 同一 tick 的所有调用共用一份结果；下一个 tick 自然重算，水位变化最多延迟 1 tick
+     * （20 Hz），和 10 Hz 的网络同步相比看不出差别。</p>
+     *
+     * <p>调用方必须只在服务端持有 {@link ShipState} 的时候用它——客户端没有这个对象。</p>
+     */
+    public ShipWaterStatePacket waterBoxesFor(long gameTime) {
+        if (waterBoxCache != null && waterBoxCacheTick == gameTime) {
+            return waterBoxCache;
+        }
+        waterBoxCache = ShipWaterStateBuilder.build(this, -1L, false, 0.0F, 0.0F, 0.0F);
+        waterBoxCacheTick = gameTime;
+        return waterBoxCache;
     }
 
     /** 连到外海的破口；随水包发给客户端，用来在洞口画水花/气泡。 */

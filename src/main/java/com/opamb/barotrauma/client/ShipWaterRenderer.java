@@ -158,6 +158,38 @@ public final class ShipWaterRenderer {
     private static float[] smoothedBoxes = new float[0];
     private static long smoothedShipId = Long.MIN_VALUE;
     private static boolean smoothedPhysical;
+
+    /**
+     * 邻居候选表：只由**几何**决定，水位变化不改变候选集合。
+     *
+     * <p>原来 {@code neighborAcross} 每个 box × 4 个面、再加一次 {@code hasNeighborBelow}，
+     * 每次都要全量扫一遍 boxes——连海空腔是按 1×1 竖列发的，一条船几百个 box，等于每帧
+     * 几十万次比较。现在把"面相邻 + 重叠"这些纯几何条件在几何变化时算一次，存成
+     * 候选下标池；每帧只对少量候选做"有没有水 / 取最高水面"的判定。</p>
+     *
+     * <p>槽位 = {@code boxIndex * 5 + face}，face 顺序同 {@link Face}：
+     * BOTTOM/NORTH/SOUTH/WEST/EAST。</p>
+     */
+    private static int[] neighborStart = new int[0];
+    private static int[] neighborCount = new int[0];
+    private static int[] neighborPool = new int[0];
+    private static long neighborGeometryHash;
+    private static int neighborBoxCount = -1;
+
+    /** 逐格水面/波浪系数：稠密网格，跨帧复用，不再每帧 new 两个 HashMap 也不做 Long 装箱。 */
+    private static int cellOriginX;
+    private static int cellOriginZ;
+    private static int cellSpanX;
+    private static int cellSpanZ;
+    private static float[] cellTopGrid = new float[0];
+    private static float[] cellScaleGrid = new float[0];
+    private static boolean[] cellPresentGrid = new boolean[0];
+    /** cornerAt 的输出缓冲，避免每次调用 new float[2]（水面网格每帧上千次）。 */
+    private static final float[] CORNER_A = new float[2];
+    private static final float[] CORNER_B = new float[2];
+    private static final float[] CORNER_C = new float[2];
+    private static final float[] CORNER_D = new float[2];
+
     private static long lastFrameNanos;
     private static double waveSeconds;
     private static long lastBreachParticleNanos;
@@ -573,8 +605,12 @@ public final class ShipWaterRenderer {
         // 相邻水柱水位不同时（灌水过程中很正常），顶面角点按周围四格平均，
         // 相邻 quad 的共享边角点两边算出来完全相等——水面变成一张连续曲面，
         // 不再有台阶面，也就不会出现一格一条的"分界线"（用户实测）。
-        java.util.HashMap<Long, Float> cellTop = new java.util.HashMap<>();
-        java.util.HashMap<Long, Float> cellScale = new java.util.HashMap<>();
+        //
+        // 用一段覆盖全部盒子的紧凑网格（下标 = (x-minX)*spanZ + (z-minZ)），
+        // 跨帧复用同一份数组；原来每帧两个 HashMap<Long,Float> 会产生上万次装箱。
+        buildCellGrid(boxes);
+        // 邻居候选表只在几何变化时重建（水位变了不影响"谁挨着谁"）。
+        ensureNeighborTable(boxes);
         for (int i = 0; i + 6 < boxes.length; i += 7) {
             if (boxes[i + 6] <= boxes[i + 1] + 0.01F) {
                 continue;
@@ -583,12 +619,7 @@ public final class ShipWaterRenderer {
             float scale = boxWaveScale(boxes, i);
             for (int x = Math.round(boxes[i]); x <= Math.round(boxes[i + 3]); x++) {
                 for (int z = Math.round(boxes[i + 2]); z <= Math.round(boxes[i + 5]); z++) {
-                    long key = packCell(x, z);
-                    Float old = cellTop.get(key);
-                    if (old == null || top > old) {
-                        cellTop.put(key, top);
-                        cellScale.put(key, scale);
-                    }
+                    putCellTop(x, z, top, scale);
                 }
             }
         }
@@ -634,10 +665,10 @@ public final class ShipWaterRenderer {
                         float xb = xa + stepX;
                         float za = minZ + iz * stepZ;
                         float zb = za + stepZ;
-                        float[] ca = cornerAt(cellTop, cellScale, xa, za, drawTop, waveScale);
-                        float[] cb = cornerAt(cellTop, cellScale, xa, zb, drawTop, waveScale);
-                        float[] cc = cornerAt(cellTop, cellScale, xb, zb, drawTop, waveScale);
-                        float[] cd = cornerAt(cellTop, cellScale, xb, za, drawTop, waveScale);
+                        float[] ca = cornerAt(xa, za, drawTop, waveScale, CORNER_A);
+                        float[] cb = cornerAt(xa, zb, drawTop, waveScale, CORNER_B);
+                        float[] cc = cornerAt(xb, zb, drawTop, waveScale, CORNER_C);
+                        float[] cd = cornerAt(xb, za, drawTop, waveScale, CORNER_D);
                         float ya = ca[0] + wave(seconds, xa, za) * ca[1];
                         float yb = cb[0] + wave(seconds, xa, zb) * cb[1];
                         float yc = cc[0] + wave(seconds, xb, zb) * cc[1];
@@ -657,7 +688,7 @@ public final class ShipWaterRenderer {
             // ---- 底面：贴地板才画；只沿法线（Y）缩 1cm，XZ 占满。
             // 之前 XZ 也缩 1cm 时，相邻列的底面之间留出 2cm 缝，从上面看地板上
             // 是一格一格的缝；现在相邻底面相接，无缝。
-            if (!hasNeighborBelow(boxes, i)) {
+            if (!hasNeighborBelowCached(boxes, i)) {
                 quadXf(vc, m, toCamera, r, g, b, a * 0.8F,
                         minX, minY + WATER_INSET, minZ,
                         maxX, minY + WATER_INSET, minZ,
@@ -668,29 +699,29 @@ public final class ShipWaterRenderer {
             // ---- 四个侧面：只画"贴舱壁/临空"的那一侧（沿法线缩 1cm，沿墙方向占满整格）。
             // 相邻水柱之间不再画竖直台阶面——台阶面正是一格一条"分界线"的来源；
             // 水位差现在由顶面的角点平均平滑过渡，水面是一张连续曲面。
-            int nIdx = neighborAcross(boxes, i, Face.NORTH);
+            int nIdx = neighborAcrossCached(boxes, i, Face.NORTH);
             if (nIdx < 0) {
                 quads += wallStrip(vc, m, toCamera, r, g, b, a * 0.8F,
                         true, minX, maxX, minZ + WATER_INSET, minZ, minY,
-                        nx, seconds, cellTop, cellScale, drawTop, waveScale);
+                        nx, seconds, drawTop, waveScale);
             }
-            nIdx = neighborAcross(boxes, i, Face.SOUTH);
+            nIdx = neighborAcrossCached(boxes, i, Face.SOUTH);
             if (nIdx < 0) {
                 quads += wallStrip(vc, m, toCamera, r, g, b, a * 0.8F,
                         true, minX, maxX, maxZ - WATER_INSET, maxZ, minY,
-                        nx, seconds, cellTop, cellScale, drawTop, waveScale);
+                        nx, seconds, drawTop, waveScale);
             }
-            nIdx = neighborAcross(boxes, i, Face.WEST);
+            nIdx = neighborAcrossCached(boxes, i, Face.WEST);
             if (nIdx < 0) {
                 quads += wallStrip(vc, m, toCamera, r, g, b, a * 0.8F,
                         false, minZ, maxZ, minX + WATER_INSET, minX, minY,
-                        nz, seconds, cellTop, cellScale, drawTop, waveScale);
+                        nz, seconds, drawTop, waveScale);
             }
-            nIdx = neighborAcross(boxes, i, Face.EAST);
+            nIdx = neighborAcrossCached(boxes, i, Face.EAST);
             if (nIdx < 0) {
                 quads += wallStrip(vc, m, toCamera, r, g, b, a * 0.8F,
                         false, minZ, maxZ, maxX - WATER_INSET, maxX, minY,
-                        nz, seconds, cellTop, cellScale, drawTop, waveScale);
+                        nz, seconds, drawTop, waveScale);
             }
             boxesDrawn++;
         }
@@ -1316,46 +1347,221 @@ public final class ShipWaterRenderer {
         BOTTOM, NORTH, SOUTH, WEST, EAST
     }
 
+    private static final int FACE_COUNT = 5;
+
     /**
-     * 跨过侧面这条边、真的有水、且水面最高的相邻棱柱下标；没有相邻水体返回 -1。
+     * 逐格水面表：用覆盖全部盒子的紧凑网格代替 {@code HashMap<Long,Float>}。
      *
-     * <p>返回 -1 表示这一侧贴着舱壁或临空（调用方沿法线缩 1cm 防 z-fight）；
-     * 有邻居时调用方只画高出邻居水面的部分，台阶每条边只画一次。</p>
+     * <p>下标 = {@code (x - cellOriginX) * cellSpanZ + (z - cellOriginZ)}。数组跨帧复用，
+     * 每帧只清空用到的那一段。原来是每帧新建两个 HashMap 并对每个格子做 {@code Long}
+     * 装箱——一格一格的水面每帧上千次分配。</p>
      */
-    private static int neighborAcross(float[] boxes, int index, Face face) {
-        float iMinX = boxes[index];
-        float iMinZ = boxes[index + 2];
-        float iMaxX = boxes[index + 3] + 1.0F;
+    private static void buildCellGrid(float[] boxes) {
+        int minX = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            minX = Math.min(minX, Math.round(boxes[i]));
+            maxX = Math.max(maxX, Math.round(boxes[i + 3]));
+            minZ = Math.min(minZ, Math.round(boxes[i + 2]));
+            maxZ = Math.max(maxZ, Math.round(boxes[i + 5]));
+        }
+        if (minX > maxX || minZ > maxZ) {
+            // 没有可用盒子；把跨度设成 0，cornerAt 会全部走 fallback。
+            cellOriginX = 0;
+            cellOriginZ = 0;
+            cellSpanX = 0;
+            cellSpanZ = 0;
+            return;
+        }
+        cellOriginX = minX;
+        cellOriginZ = minZ;
+        cellSpanX = maxX - minX + 1;
+        cellSpanZ = maxZ - minZ + 1;
+        int size = cellSpanX * cellSpanZ;
+        if (cellTopGrid.length < size) {
+            // 留一点余量：船略变大时不必每帧重新分配。
+            int capacity = Math.max(size, cellTopGrid.length * 2);
+            cellTopGrid = new float[capacity];
+            cellScaleGrid = new float[capacity];
+            cellPresentGrid = new boolean[capacity];
+        } else {
+            java.util.Arrays.fill(cellPresentGrid, 0, size, false);
+        }
+    }
+
+    private static void putCellTop(int x, int z, float top, float scale) {
+        int ix = x - cellOriginX;
+        int iz = z - cellOriginZ;
+        if (ix < 0 || ix >= cellSpanX || iz < 0 || iz >= cellSpanZ) {
+            return;
+        }
+        int index = ix * cellSpanZ + iz;
+        if (index >= cellPresentGrid.length) {
+            return;
+        }
+        if (!cellPresentGrid[index] || top > cellTopGrid[index]) {
+            cellPresentGrid[index] = true;
+            cellTopGrid[index] = top;
+            cellScaleGrid[index] = scale;
+        }
+    }
+
+    /**
+     * 重建邻居候选表。只在**几何**变化时做；水位变化不影响"谁挨着谁"。
+     *
+     * <p>每个 box 的 5 个面各有一个候选下标池。建表时套用所有只依赖几何的条件
+     * （面相邻、XZ 重叠、邻居不整体悬在头顶）；每帧只对少数候选检查"邻居有没有水"
+     * 并取最高水面。</p>
+     */
+    private static void ensureNeighborTable(float[] boxes) {
+        int count = boxes.length / 7;
+        long hash = geometryHash(boxes);
+        if (hash == neighborGeometryHash && count == neighborBoxCount) {
+            return;
+        }
+        neighborGeometryHash = hash;
+        neighborBoxCount = count;
+        int slots = count * FACE_COUNT;
+        // 两个数组必须保持**同长**：下面 Arrays.fill(neighborCount, 0, slots, 0)
+        // 和 neighborStart[slots] 都要求 length >= slots + 1，分开按不同公式扩容会让
+        // 较慢的一边在某个 slots 上不够用而越界。这里一次分配同容量。
+        if (neighborStart.length < slots + 1 || neighborCount.length < slots + 1) {
+            int capacity = Math.max(slots + 1,
+                    Math.max(neighborStart.length, neighborCount.length) * 2);
+            neighborStart = new int[capacity];
+            neighborCount = new int[capacity];
+        }
+        // 先统计每个槽位的候选数，前缀和得到池内起始位置，再填池——两趟，零装箱。
+        java.util.Arrays.fill(neighborCount, 0, slots, 0);
+        for (int i = 0; i < count; i++) {
+            int base = i * 7;
+            for (int f = 0; f < FACE_COUNT; f++) {
+                for (int j = 0; j < count; j++) {
+                    if (j == i) {
+                        continue;
+                    }
+                    if (isGeometricNeighbor(boxes, base, j * 7, f)) {
+                        neighborCount[i * FACE_COUNT + f]++;
+                    }
+                }
+            }
+        }
+        int total = 0;
+        for (int s = 0; s < slots; s++) {
+            neighborStart[s] = total;
+            total += neighborCount[s];
+        }
+        neighborStart[slots] = total;
+        if (neighborPool.length < total) {
+            neighborPool = new int[Math.max(total, neighborPool.length * 2)];
+        }
+        // 用一个游标数组回填池。
+        if (fillCursor.length < slots) {
+            fillCursor = new int[Math.max(slots, fillCursor.length * 2)];
+        }
+        for (int s = 0; s < slots; s++) {
+            fillCursor[s] = neighborStart[s];
+        }
+        for (int i = 0; i < count; i++) {
+            int base = i * 7;
+            for (int f = 0; f < FACE_COUNT; f++) {
+                int slot = i * FACE_COUNT + f;
+                for (int j = 0; j < count; j++) {
+                    if (j == i) {
+                        continue;
+                    }
+                    if (isGeometricNeighbor(boxes, base, j * 7, f)) {
+                        neighborPool[fillCursor[slot]++] = j * 7;
+                    }
+                }
+            }
+        }
+    }
+
+    private static int[] fillCursor = new int[0];
+
+    /**
+     * 只有几何条件的相邻判定（和原 {@code neighborAcross}/{@code hasNeighborBelow}
+     * 里与水位无关的部分逐字一致）。
+     *
+     * <p><b>注意 NORTH 分支沿用了原代码的 {@code boxes[j+3]}（maxX）</b>：正确的面判定
+     * 应该是 {@code boxes[j+5]}（maxZ）。这里刻意保留原行为，让这次改动是纯粹的
+     * 性能优化、不改变任何画面；是否修这个 bug 单独决定（改了会改变北侧水带的绘制）。</p>
+     *
+     * @param face {@link Face} 的下标：0=BOTTOM 1=NORTH 2=SOUTH 3=WEST 4=EAST
+     */
+    private static boolean isGeometricNeighbor(float[] boxes, int ib, int jb, int face) {
+        float iMinX = boxes[ib];
+        float iMinY = boxes[ib + 1];
+        float iMinZ = boxes[ib + 2];
+        float iMaxX = boxes[ib + 3] + 1.0F;
+        float iMaxY = boxes[ib + 4] + 1.0F;
+        float iMaxZ = boxes[ib + 5] + 1.0F;
+        float jMinX = boxes[jb];
+        float jMinY = boxes[jb + 1];
+        float jMinZ = boxes[jb + 2];
+        float jMaxX = boxes[jb + 3] + 1.0F;
+        float jMaxZ = boxes[jb + 5] + 1.0F;
+        switch (face) {
+            case 1: // NORTH：原代码用 maxX 比 minZ（既存 bug，见上方说明）
+                return Math.abs(jMaxX - iMinZ) < 1.0E-3F && jMinY < iMaxY
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX);
+            case 2: // SOUTH
+                return Math.abs(jMinZ - iMaxZ) < 1.0E-3F && jMinY < iMaxY
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX);
+            case 3: // WEST
+                return Math.abs(jMaxX - iMinX) < 1.0E-3F && jMinY < iMaxY
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ);
+            case 4: // EAST
+                return Math.abs(jMinX - iMaxX) < 1.0E-3F && jMinY < iMaxY
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ);
+            default: // BOTTOM：邻居顶面正好贴着我的底面
+                return Math.abs((boxes[jb + 4] + 1.0F) - iMinY) < 1.0E-3F
+                        && overlap(iMinX, iMaxX, jMinX, jMaxX)
+                        && overlap(iMinZ, iMaxZ, jMinZ, jMaxZ);
+        }
+    }
+
+    /**
+     * 只由几何决定的指纹（不含水面高度）。用一个简单的多项式滚过去，
+     * 每次比较只花 O(boxes) 且不分配。
+     */
+    private static long geometryHash(float[] boxes) {
+        long hash = 1125899906842597L;
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            for (int k = 0; k < 6; k++) {
+                hash = hash * 31L + Float.floatToIntBits(boxes[i + k]);
+            }
+        }
+        return hash;
+    }
+
+    /**
+     * 缓存版 {@code neighborAcross}：语义与原实现完全一致，只是候选集合预先算好。
+     */
+    private static int neighborAcrossCached(float[] boxes, int index, Face face) {
+        int step = index / 7;
+        int slot = step * FACE_COUNT + face.ordinal();
+        if (slot < 0 || slot + 1 >= neighborStart.length) {
+            return -1;
+        }
+        int from = neighborStart[slot];
+        int to = neighborStart[slot + 1];
+        if (from < 0 || to > neighborPool.length) {
+            return -1;
+        }
         float iMaxY = boxes[index + 4] + 1.0F;
-        float iMaxZ = boxes[index + 5] + 1.0F;
         int best = -1;
         float bestTop = Float.NEGATIVE_INFINITY;
-        for (int j = 0; j + 6 < boxes.length; j += 7) {
-            if (j == index) {
-                continue;
-            }
-            // 邻居自己必须真的有水；完全干燥的棱柱不算。
+        for (int c = from; c < to; c++) {
+            int j = neighborPool[c];
+            // 动态条件：邻居自己必须真的有水。
             if (boxes[j + 6] <= boxes[j + 1] + 0.01F) {
                 continue;
             }
-            // 邻居整体悬在我头顶（底沿高过我的顶）时它的水盖不到我的侧面。
             if (boxes[j + 1] >= iMaxY) {
-                continue;
-            }
-            boolean adjacent = false;
-            switch (face) {
-                case NORTH -> adjacent = Math.abs((boxes[j + 3] + 1.0F) - iMinZ) < 1.0E-3F
-                        && overlap(iMinX, iMaxX, boxes[j], boxes[j + 3] + 1.0F);
-                case SOUTH -> adjacent = Math.abs(boxes[j + 2] - iMaxZ) < 1.0E-3F
-                        && overlap(iMinX, iMaxX, boxes[j], boxes[j + 3] + 1.0F);
-                case WEST -> adjacent = Math.abs((boxes[j + 3] + 1.0F) - iMinX) < 1.0E-3F
-                        && overlap(iMinZ, iMaxZ, boxes[j + 2], boxes[j + 5] + 1.0F);
-                case EAST -> adjacent = Math.abs(boxes[j] - iMaxX) < 1.0E-3F
-                        && overlap(iMinZ, iMaxZ, boxes[j + 2], boxes[j + 5] + 1.0F);
-                default -> {
-                }
-            }
-            if (!adjacent) {
                 continue;
             }
             float jTop = Math.min(boxes[j + 6], boxes[j + 4] + 1.0F);
@@ -1365,6 +1571,27 @@ public final class ShipWaterRenderer {
             }
         }
         return best;
+    }
+
+    /** 缓存版 {@code hasNeighborBelow}。 */
+    private static boolean hasNeighborBelowCached(float[] boxes, int index) {
+        int step = index / 7;
+        int slot = step * FACE_COUNT + Face.BOTTOM.ordinal();
+        if (slot < 0 || slot + 1 >= neighborStart.length) {
+            return false;
+        }
+        int from = neighborStart[slot];
+        int to = neighborStart[slot + 1];
+        if (from < 0 || to > neighborPool.length) {
+            return false;
+        }
+        for (int c = from; c < to; c++) {
+            int j = neighborPool[c];
+            if (boxes[j + 6] > boxes[j + 1] + 0.01F) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 这个盒子的水面画在哪（满舱时压到天花板内侧 1cm）。 */
@@ -1396,8 +1623,6 @@ public final class ShipWaterRenderer {
                                  boolean alongX, float a0, float a1,
                                  float drawPlane, float evalPlane, float minY,
                                  int segments, float seconds,
-                                 java.util.HashMap<Long, Float> cellTop,
-                                 java.util.HashMap<Long, Float> cellScale,
                                  float fallbackTop, float fallbackScale) {
         float bottom = minY + WATER_INSET;
         int drawn = 0;
@@ -1421,8 +1646,8 @@ public final class ShipWaterRenderer {
                 x0 = drawPlane; z0 = p0; x1 = drawPlane; z1 = p1;
                 ex0 = evalPlane; ez0 = p0; ex1 = evalPlane; ez1 = p1;
             }
-            float[] c0 = cornerAt(cellTop, cellScale, ex0, ez0, fallbackTop, fallbackScale);
-            float[] c1 = cornerAt(cellTop, cellScale, ex1, ez1, fallbackTop, fallbackScale);
+            float[] c0 = cornerAt(ex0, ez0, fallbackTop, fallbackScale, CORNER_A);
+            float[] c1 = cornerAt(ex1, ez1, fallbackTop, fallbackScale, CORNER_B);
             float top0 = c0[0] + wave(seconds, ex0, ez0) * c0[1];
             float top1 = c1[0] + wave(seconds, ex1, ez1) * c1[1];
             quadXf(vc, m, toCamera, red, green, blue, alpha,
@@ -1440,10 +1665,11 @@ public final class ShipWaterRenderer {
      *
      * <p>相邻 quad 的共享角点用同一组格子求平均，结果完全相等——这是水面
      * 在相邻水柱水位不同时仍然连续、不出台阶/分界线的关键。干燥格不参与。</p>
+     *
+     * <p>结果写进调用方提供的 {@code out}，不再每次 new 数组（水面网格每帧上千次调用）。</p>
      */
-    private static float[] cornerAt(java.util.HashMap<Long, Float> cellTop,
-                                    java.util.HashMap<Long, Float> cellScale,
-                                    float cx, float cz, float fallbackTop, float fallbackScale) {
+    private static float[] cornerAt(float cx, float cz,
+                                    float fallbackTop, float fallbackScale, float[] out) {
         int fx = (int) Math.floor(cx);
         int fz = (int) Math.floor(cz);
         float top = 0.0F;
@@ -1451,48 +1677,28 @@ public final class ShipWaterRenderer {
         int count = 0;
         for (int dx = -1; dx <= 0; dx++) {
             for (int dz = -1; dz <= 0; dz++) {
-                Float value = cellTop.get(packCell(fx + dx, fz + dz));
-                if (value != null) {
-                    top += value;
-                    Float s = cellScale.get(packCell(fx + dx, fz + dz));
-                    scale += s == null ? fallbackScale : s;
-                    count++;
+                int ix = fx + dx - cellOriginX;
+                int iz = fz + dz - cellOriginZ;
+                if (ix < 0 || ix >= cellSpanX || iz < 0 || iz >= cellSpanZ) {
+                    continue;
                 }
+                int index = ix * cellSpanZ + iz;
+                if (index >= cellPresentGrid.length || !cellPresentGrid[index]) {
+                    continue;
+                }
+                top += cellTopGrid[index];
+                scale += cellScaleGrid[index];
+                count++;
             }
         }
         if (count == 0) {
-            return new float[]{fallbackTop, fallbackScale};
+            out[0] = fallbackTop;
+            out[1] = fallbackScale;
+            return out;
         }
-        return new float[]{top / count, scale / count};
-    }
-
-    private static long packCell(int x, int z) {
-        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
-    }
-
-    /** 正下方有真的有水、且 XZ 重叠的棱柱时，底面是水体内部面。 */
-    private static boolean hasNeighborBelow(float[] boxes, int index) {
-        float iMinX = boxes[index];
-        float iMinY = boxes[index + 1];
-        float iMinZ = boxes[index + 2];
-        float iMaxX = boxes[index + 3] + 1.0F;
-        float iMaxZ = boxes[index + 5] + 1.0F;
-        for (int j = 0; j + 6 < boxes.length; j += 7) {
-            if (j == index) {
-                continue;
-            }
-            if (Math.abs((boxes[j + 4] + 1.0F) - iMinY) >= 1.0E-3F) {
-                continue;
-            }
-            if (boxes[j + 6] <= boxes[j + 1] + 0.01F) {
-                continue;
-            }
-            if (overlap(iMinX, iMaxX, boxes[j], boxes[j + 3] + 1.0F)
-                    && overlap(iMinZ, iMaxZ, boxes[j + 2], boxes[j + 5] + 1.0F)) {
-                return true;
-            }
-        }
-        return false;
+        out[0] = top / count;
+        out[1] = scale / count;
+        return out;
     }
 
     private static boolean overlap(float aMin, float aMax, float bMin, float bMax) {

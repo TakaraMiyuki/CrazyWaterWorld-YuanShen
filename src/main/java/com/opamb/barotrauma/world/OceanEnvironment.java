@@ -1,10 +1,8 @@
 package com.opamb.barotrauma.world;
 
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
-import com.opamb.barotrauma.network.ShipWaterStatePacket;
 import com.opamb.barotrauma.ship.ShipCores;
 import com.opamb.barotrauma.ship.ShipState;
-import com.opamb.barotrauma.ship.ShipWaterStateBuilder;
 import com.opamb.barotrauma.ship.vs.VsState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
@@ -109,8 +107,9 @@ public final class OceanEnvironment {
             // 船状态还没扫出来：初始潜艇内腔按干燥兜底，别让玩家一出生就掉氧。
             return starterFallback;
         }
-        ShipWaterStatePacket packet = ShipWaterStateBuilder.build(state, -1L, false, 0.0F, 0.0F, 0.0F);
-        float[] boxes = packet.boxes();
+        // 按游戏刻缓存：同一 tick 里每个玩家都会问一次，不能每次都重建水面包
+        // （build 里的矩形分解和连海空腔松弛远比这次包围盒判定贵）。
+        float[] boxes = state.waterBoxesFor(level.getGameTime()).boxes();
         if (boxes.length < 7) {
             return starterFallback;
         }
