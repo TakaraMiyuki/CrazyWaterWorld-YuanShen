@@ -47,7 +47,7 @@ class ShipWaterStateBuilderTest {
         return new ShipGeometry.Result(
                 pocket ? List.of() : List.of(compartment),
                 pocket ? List.of(compartment) : List.of(),
-                0, compartment.volume(), bounds, Set.of());
+                0, compartment.volume(), bounds, Set.of(), List.of());
     }
 
     private static float surfaceOf(ShipState state) {
@@ -145,7 +145,7 @@ class ShipWaterStateBuilderTest {
                 new ShipGeometry.Compartment(Set.of(new BlockPos(1, 0, 1)), 0);
         ShipGeometry.Bounds bounds = new ShipGeometry.Bounds(0, 0, 0, 2, 0, 2);
         ShipGeometry.Result geometry = new ShipGeometry.Result(
-                List.of(sealed), List.of(pocket), 0, 9, bounds, Set.of());
+                List.of(sealed), List.of(pocket), 0, 9, bounds, Set.of(), List.of());
         ShipState state = new ShipState(geometry, MachineCount.EMPTY);
         state.simulation().tickSeaFlood(0.1D, 0.0D);
 

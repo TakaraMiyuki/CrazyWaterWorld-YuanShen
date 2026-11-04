@@ -33,6 +33,14 @@ If you haven't already read `AGENTS.md`, read it now — it contains the project
 
 Then read this file fully before doing anything else in this session.
 
+## 合作者下次开工提醒：先读模块还原路线
+
+开工前请阅读 [潜渊症八大模块协作路线](../docs/BAROTRAUMA_MODULE_ROADMAP.md)。它结合官方 Wiki 与仓库现状，包含白话职责、完整子步骤、首轮交付、接口边界及夜间 `/goal` 模板。
+
+先与人类确认认领的大模块和共同基线，再开始实现；路线不是已分配任务，也不是已完成功能清单。不同模块使用独立工作目录，先约定公共接口，避免各自重造或同时覆盖船、水、供电、伤病等核心系统。方案内精确原作数值仍须逐项核实。
+
+这是随 Git 分享的开工阅读入口，不是自动通知；合作者获取包含本提醒的提交后才能看到。
+
 ## Current Project State
 
 **Working:**
@@ -43,7 +51,14 @@ Then read this file fully before doing anything else in this session.
 - Per-compartment scalar water simulation, breach inflow splash/bubbles, ballast, pumps, reactor, and `/barotrauma ship flood` diagnostics.
 - Per-block hull durability (plating 200 / glass 100), melee + explosion + block-ship collision damage, welding-tool repair, camera-facing billboard bars (readable at any view angle), vanilla-style cracks (all 6 faces, outside-visible), damage-scaled leak splashes, and `ShipHullDamagePacket` sync.
 - Sonar screen/hologram, depth HUD, underwater fog, movement drag, and oxygen/drowning survival.
-- L1 unit tests (42, including `HullDamageNbtTest`) pass; 3 GameTests and L3 `.smoketest-vs` passed earlier.
+- **Bulkhead door (`barotrauma:bulkhead_door`, 1×2) and deck hatch (`barotrauma:hatch`, 3×1)**, GeckoLib
+  rendered, toggled by right-clicking the fixed frame (the open state's pick shape is frame-only, so
+  the doorway does not block attacks). The door was redrawn 2026-11-04: 15 axis-aligned cuboids,
+  6×8 real window opening with cutout glass, panel slides 16px into the side wall (`open` 0.6 s).
+  Pick shapes are cached per `FACING` via `DoorShapes.slab`; a fixed north-facing shape previously
+  left east/west doors clickable only at a 1px centre overlap. Toggle sounds are the original
+  Barotrauma `Door1..4.ogg`.
+- L1 unit tests (46, including `HullDamageNbtTest`) pass; 3 GameTests and L3 `.smoketest-vs` passed earlier.
 
 **Not yet built:**
 - Multi-ship support (one `VsPilot` singleton manages one physical ship).
@@ -54,6 +69,9 @@ Then read this file fully before doing anything else in this session.
 - Migration of old saves containing real water or removed `hull_plug` blocks.
 
 **Known issues:**
+- **OPEN (not yet confirmed in game): east/west-facing bulkhead doors close by right-clicking the frame.** Shapes now rotate with `FACING`; the old symptom was "only the door centre reacts".
+- **OPEN: the drain pump still empties a whole connected compartment** ("只要在一个房间都会抽" per user). The `[pump]` log (every 20 ticks) in `ShipSimulation` is intentionally kept for this.
+- **Do not read "cannot sink inside the ship" as a swim bug.** 2026-11-04: the player stood on the cabin floor while the breached ship sank (world y falling, assembly coordinates constant). On VS2 physical ships `getBlockState` at the ship's world position is always air and `getBlockCollisions` does not see the hull; map back with `pos - VsState.offset*` before concluding anything.
 - **OPEN: compartment water surface still shows visible seams/boundary lines** after multiple fix rounds (2026-11-04 user test). Current renderer uses per-corner surface averaging + waves + no step faces; still not clean. Next step: run `-Dbarotrauma.waterDebug=true` in a real flooded scene (assembled physical ship + breaches) and dump the `[water-diag]` log before changing geometry again. See `patterns/debug-ship-water.md`.
 - Without any `ShipWaterStatePacket` (fresh world, ship not assembled: `ship=-1 boxes=0`), the water renderer does nothing and the underwater filter tints ship interiors — do not misread that as a water-rendering bug. Check `[water] 画水面` box counts first.
 - The current MEX code graph indexes only the 3 files under `tools/`; Java sources are not in the graph. Use Grep/Read for Java.

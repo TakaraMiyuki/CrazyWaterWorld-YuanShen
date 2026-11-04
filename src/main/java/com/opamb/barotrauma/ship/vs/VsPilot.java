@@ -111,9 +111,20 @@ public final class VsPilot {
     static {
         VsState.install(VsPilot::observeCore, VsPilot::tryDamage,
                 VsPilot::tryRepair, VsPilot::damageExplosion);
+        VsState.installGeometryRefresh(VsPilot::refreshPhysicalGeometry);
         // 只注册服务端干燥区：单人存档里客户端和集成服务端同进程，
         // 客户端渲染用的 ShipWaterRenderer 不能被这里覆盖（否则方块船舱内会漏滤镜）。
-        OceanEnvironment.setServerDryZone(VsPilot::isInsideDryZone);
+        OceanEnvironment.setServerDryZone(new OceanEnvironment.DryZone() {
+            @Override
+            public boolean isDry(Level level, Vec3 pos) {
+                return VsPilot.isInsideDryZone(level, pos);
+            }
+
+            @Override
+            public boolean isInsideCompartment(Level level, Vec3 pos) {
+                return VsPilot.isInsideCompartment(level, pos);
+            }
+        });
     }
 
     /** 装配刚完成时 VS2 可能还没把这艘船标成"已加载"，推进器先挂在这里，下一 tick 再试。 */
@@ -317,6 +328,28 @@ public final class VsPilot {
         return managing != null && managing.getId() == ship.getId();
     }
 
+    /** 这个位置是不是在某个物理船舱的盒子里（不管进没进水）。 */
+    public static boolean isInsideCompartment(Level level, Vec3 pos) {
+        if (ship == null || state == null || level == null || pos == null) {
+            return false;
+        }
+        float[] boxes = lastWaterPacket.boxes();
+        if (boxes.length < 7) {
+            return false;
+        }
+        double lx = pos.x - VsState.offsetX();
+        double ly = pos.y - VsState.offsetY();
+        double lz = pos.z - VsState.offsetZ();
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            if (lx >= boxes[i] && lx <= boxes[i + 3] + 1.0F
+                    && ly >= boxes[i + 1] && ly <= boxes[i + 4] + 1.0F
+                    && lz >= boxes[i + 2] && lz <= boxes[i + 5] + 1.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * 玩家/实体是否在“未进水的船舱”里。
      *
@@ -344,10 +377,11 @@ public final class VsPilot {
             float maxY = boxes[i + 4] + 1.0F;
             float maxZ = boxes[i + 5] + 1.0F;
             float surface = boxes[i + 6];
+            boolean dryBox = surface <= minY + 0.01F;
             if (lx >= minX && lx <= maxX
                     && ly >= minY && ly <= maxY
                     && lz >= minZ && lz <= maxZ
-                    && ly > surface + 0.01F) {
+                    && (dryBox || ly > surface + 0.01F)) {
                 return true;
             }
         }
@@ -432,6 +466,8 @@ public final class VsPilot {
                 }
                 // 还没破块、但伤害 ≥10%/70% 的船壳渗水
                 state.tickLeaks(0.1D);
+                // 开着的门：两侧水位不一样时按限速慢慢流，不做瞬间均摊
+                state.simulation().tickDoorFlow(0.1D);
             } catch (Throwable ignored) {
                 // 模拟出错不影响物理
             }
@@ -716,6 +752,22 @@ public final class VsPilot {
      * <p>物理船上砸方块由 {@link #tryBreak} 直接处理；这里兜的是爆炸、命令、
      * 其它 mod 等旁路修改。破口会让舱室从"密闭"变成"连海"，模拟里开始进水。</p>
      */
+    /** 门开合后强制重扫船坞几何；方块类型没变，{@link #refreshHull} 不会触发。 */
+    private static void refreshPhysicalGeometry(ServerLevel level) {
+        rebuildGeometry(level, List.of());
+    }
+
+    /**
+     * 船坞坐标 → 装配坐标。物理船的方块实体（排水泵等）报上来的是船坞里的格子，
+     * 而船状态里的舱室、破口全是装配坐标。
+     */
+    public static BlockPos toAssembly(BlockPos yardPos) {
+        if (yardPos == null || yardOffsetX == Integer.MIN_VALUE) {
+            return yardPos;
+        }
+        return yardPos.offset(-yardOffsetX, -yardOffsetY, -yardOffsetZ);
+    }
+
     private static void refreshHull(ServerLevel level) {
         ShipState current = state;
         if (current == null || snapshot.isEmpty() || yardOffsetX == Integer.MIN_VALUE) {
@@ -770,6 +822,16 @@ public final class VsPilot {
             public boolean isWater(BlockPos pos) {
                 // 船坞区块里是船体方块本身，没有海水；进水是模拟量
                 return false;
+            }
+
+            @Override
+            public boolean isDoorway(BlockPos pos) {
+                return ModShipBlocks.isDoorway(level.getBlockState(pos.offset(ox, oy, oz)));
+            }
+
+            @Override
+            public boolean isOpenDoorway(BlockPos pos) {
+                return ModShipBlocks.isOpenDoorway(level.getBlockState(pos.offset(ox, oy, oz)));
             }
         };
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
@@ -1560,6 +1622,25 @@ public final class VsPilot {
 
     // ------------------------------------------------------------------ 认领记录（P1 持久化）
 
+    /**
+     * 认领失败后的连贯回滚：清掉本 tick 可能已部分发布的运行时状态，<strong>保留存档记录</strong>。
+     *
+     * <p>{@link #adoptFromSave} 入口保证 {@code ship == null}；此处若非空，说明
+     * {@link #adopt} 已经发布到一半（几何重建成功、{@code sendWaterState} 等尾部
+     * 步骤抛了异常）。不回滚的话就是"运行时已接管"的半套状态。
+     * {@link #resetForServerLifecycle()} 是纯内存清理，不碰任何世界方块。</p>
+     *
+     * <p>记录必须保留：VS2 船还在（回滚不删刚体），清了记录它就是永久孤儿。
+     * 保留的代价是确定性损坏时每次重启都会重试失败一次——可观测、可人工修复
+     * （修数据或 {@code /vs delete}），且绝不产生双份船。</p>
+     */
+    private static void rollbackPartialAdoption() {
+        if (ship != null) {
+            resetForServerLifecycle();
+        }
+        pendingAdoption = null;
+    }
+
     /** 装配成功：把认领记录写进世界存档；世界加载后 P1.2 按它接回物理船。 */
     private static void recordAssembled(ServerLevel level, Map<BlockPos, BlockState> captured,
                                         ShipState shipState, BlockPos core, ServerShip assembled) {
@@ -1592,6 +1673,21 @@ public final class VsPilot {
             record.hullMultiplier = state.hullHealthMultiplier();
             if (proxyPos != null) {
                 record.proxyPos = proxyPos;
+            }
+            // 位置回退匹配用的"最后已知位置"：只认"已加载"的刚体句柄。
+            // view() 的回退句柄（未加载数据船）读到的是陈旧 transform，会把 lastX/Y/Z
+            // 写回旧位置；也不能写 record.x/y/z——那是快照坐标空间的装配锚点，动它会
+            // 破坏破口的世界→快照映射。
+            try {
+                LoadedServerShip live = VsBridge.loaded(level, ship);
+                if (live != null) {
+                    Vec3 now = VsBridge.position(live);
+                    record.lastX = now.x;
+                    record.lastY = now.y;
+                    record.lastZ = now.z;
+                }
+            } catch (Throwable ignored) {
+                // 读不到就保留上一次的已知位置
             }
             data.setDirty();
         } catch (Throwable error) {
@@ -1637,11 +1733,20 @@ public final class VsPilot {
         }
         ServerShip found = VsBridge.ensureShipDataLoaded(level, record.vsShipId);
         if (found == null) {
-            found = VsBridge.nearestShip(level, record.x, record.y, record.z,
+            // 用"最后已知位置"而不是装配位置：船开出去再停服的话，装配原点早就不是船所在了
+            found = VsBridge.nearestShip(level, record.lastX, record.lastY, record.lastZ,
                     ADOPT_POSITION_TOLERANCE);
         }
         if (found != null) {
-            adopt(level, record, found);
+            // 认领路径抛任何异常都不许带崩启动（这里跑在 ServerStarted 的下一 tick 主线程）：
+            // 回滚 + 清记录，降级为无物理船，宁可少一艘船，不要开不起服
+            try {
+                adopt(level, record, found);
+            } catch (Throwable error) {
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚运行时状态（记录保留，下次重启重试）",
+                        record.vsShipId, error.toString());
+                rollbackPartialAdoption();
+            }
             pendingAdoption = null;
             return;
         }
@@ -1664,16 +1769,37 @@ public final class VsPilot {
         }
         ServerShip found = VsBridge.ensureShipDataLoaded(level, pendingAdoption.vsShipId);
         if (found == null) {
-            found = VsBridge.nearestShip(level, pendingAdoption.x, pendingAdoption.y,
-                    pendingAdoption.z, ADOPT_POSITION_TOLERANCE);
+            found = VsBridge.nearestShip(level, pendingAdoption.lastX, pendingAdoption.lastY,
+                    pendingAdoption.lastZ, ADOPT_POSITION_TOLERANCE);
         }
         if (found != null) {
-            adopt(level, pendingAdoption, found);
+            // 与 adoptFromSave 相同的兜底：认领异常回滚 + 清记录降级，不带崩 tick 循环
+            try {
+                adopt(level, pendingAdoption, found);
+            } catch (Throwable error) {
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚运行时状态（记录保留，下次重启重试）",
+                        pendingAdoption.vsShipId, error.toString());
+                rollbackPartialAdoption();
+            }
             pendingAdoption = null;
             return;
         }
         if (level.getGameTime() > adoptDeadlineGameTime) {
-            LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体，按丢失处理", ADOPT_RETRY_TICKS / 20L);
+            // 铺方块前的终检（三态）：按 id 和按最后已知位置（全量船，含不同 id 的
+            // 恢复结果）都确认不存在，才允许铺——查询失败或疑似仍在都继续等。
+            // 铺错（双份船）不可逆，拒绝铺（继续等）可逆。
+            Boolean gone = VsBridge.shipDefinitelyGone(level, pendingAdoption.vsShipId,
+                    pendingAdoption.lastX, pendingAdoption.lastY, pendingAdoption.lastZ,
+                    ADOPT_POSITION_TOLERANCE);
+            if (gone == null || !gone) {
+                adoptDeadlineGameTime = level.getGameTime() + ADOPT_RETRY_TICKS;
+                LOGGER.warn("[vs] 超时但 VS2 船数据{}，延长 {} 秒继续等待认领",
+                        gone == null ? "查询失败（暂无法判定）" : "仍有疑似存在的船",
+                        ADOPT_RETRY_TICKS / 20L);
+                return;
+            }
+            LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体且确认已不存在，按丢失处理",
+                    ADOPT_RETRY_TICKS / 20L);
             restoreRecordBlocks(level, pendingAdoption);
             try {
                 ShipSavedData.get(level).clearAssembled();
@@ -1772,6 +1898,18 @@ public final class VsPilot {
             public boolean isWater(BlockPos pos) {
                 return false;
             }
+
+            @Override
+            public boolean isDoorway(BlockPos pos) {
+                BlockState blockState = snap.get(pos);
+                return blockState != null && ModShipBlocks.isDoorway(blockState);
+            }
+
+            @Override
+            public boolean isOpenDoorway(BlockPos pos) {
+                BlockState blockState = snap.get(pos);
+                return blockState != null && ModShipBlocks.isOpenDoorway(blockState);
+            }
         };
         ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
                 snap::containsKey, probe);
@@ -1790,12 +1928,17 @@ public final class VsPilot {
             }
         }
         rebuilt.addBreaches(breached);
-        rebuilt.simulation().setBreachSize(Math.max(1, breached.size()));
+        // 破口大小与 live 路径（refreshHull :790）同口径：被整格打掉的格 + 快照里 BREACHED 状态的格。
+        // 只数 breached 会漏掉打穿的洞——重启后进水比重启前慢，且此后每次重扫的 destroyed 都从 0 起算。
+        // initialBlocks<=0 是旧存档（无该字段），按当前快照大小兜底（与原行为一致）。
+        int initial = record.initialBlocks > 0 ? record.initialBlocks : snap.size();
+        int destroyed = Math.max(0, initial - snap.size());
+        rebuilt.simulation().setBreachSize(Math.max(1, destroyed + breached.size()));
 
         ship = found;
         state = rebuilt;
         snapshot = snap;
-        initialShipBlocks = snap.size();
+        initialShipBlocks = initial;
         corePos = core;
         sonarAnchor = core;
         proxyPos = record.proxyPos;

@@ -249,6 +249,39 @@ public final class ShipWaterRenderer {
     }
 
     /**
+     * 这个位置是不是落在某个船舱的盒子里（不管进没进水）。
+     *
+     * <p>进水的舱室必须按"浸没"处理——哪怕船停在哨站干燥区里。</p>
+     */
+    public static boolean isInsideCompartment(Level level, Vec3 pos) {
+        if (pos == null) {
+            return false;
+        }
+        ShipWaterStatePacket data = state;
+        if (!data.physical() && OceanEnvironment.isInsideStarterSubDryZone(pos)) {
+            return true;
+        }
+        float[] boxes = data.boxes();
+        if (boxes.length < 7) {
+            return false;
+        }
+        if (data.physical() && !lastShipFound) {
+            return false;
+        }
+        double lx = pos.x - lastDeltaX;
+        double ly = pos.y - lastDeltaY;
+        double lz = pos.z - lastDeltaZ;
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            if (lx >= boxes[i] && lx <= boxes[i + 3] + 1.0F
+                    && ly >= boxes[i + 1] && ly <= boxes[i + 4] + 1.0F
+                    && lz >= boxes[i + 2] && lz <= boxes[i + 5] + 1.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 客户端判断某个位置是否在“未进水的船舱”里。
      *
      * <p>水面包里的盒子是装配坐标，渲染位置相对锚点的位移由 onRenderStage 每帧缓存；
@@ -295,7 +328,9 @@ public final class ShipWaterRenderer {
                     || minZ > StarterSub.ORIGIN_Z + StarterSub.SIZE_Z - 1) {
                 continue;
             }
-            if (eyeY <= boxes[i + 6] + 0.01F) {
+            // 干燥盒子（水面=舱底）不算进水，别把站在舱底的人判成湿的。
+            boolean dryBox = boxes[i + 6] <= boxes[i + 1] + 0.01F;
+            if (!dryBox && eyeY <= boxes[i + 6] + 0.01F) {
                 return false;
             }
         }
@@ -317,7 +352,9 @@ public final class ShipWaterRenderer {
             if (px >= minX && px <= maxX
                     && py >= minY && py <= top
                     && pz >= minZ && pz <= maxZ
-                    && py > surface + 0.01F) {
+                    // 干燥盒子整个都算干（水面就是舱底，脚底正好等于它）；
+                    // 进过水的箱子仍然要求高于水面。
+                    && (dryBox || py > surface + 0.01F)) {
                 return true;
             }
         }
@@ -1484,11 +1521,12 @@ public final class ShipWaterRenderer {
 
     /**
      * 只有几何条件的相邻判定（和原 {@code neighborAcross}/{@code hasNeighborBelow}
-     * 里与水位无关的部分逐字一致）。
+     * 里与水位无关的部分一致）。
      *
-     * <p><b>注意 NORTH 分支沿用了原代码的 {@code boxes[j+3]}（maxX）</b>：正确的面判定
-     * 应该是 {@code boxes[j+5]}（maxZ）。这里刻意保留原行为，让这次改动是纯粹的
-     * 性能优化、不改变任何画面；是否修这个 bug 单独决定（改了会改变北侧水带的绘制）。</p>
+     * <p>NORTH 分支用 {@code jMaxZ} 与 {@code iMinZ} 比较：邻居的 maxZ 贴着自己的 minZ。
+     * 旧实现误写成 {@code boxes[j+3]}（maxX），拿 X 去和 Z 比，条件几乎永远不成立，
+     * 每根水柱的北面都被判成临空、多画一条竖面（"一格一条线"）。该 bug 已在 #12
+     * 于旧函数上修过，这里迁移时同步带上。</p>
      *
      * @param face {@link Face} 的下标：0=BOTTOM 1=NORTH 2=SOUTH 3=WEST 4=EAST
      */
@@ -1505,8 +1543,8 @@ public final class ShipWaterRenderer {
         float jMaxX = boxes[jb + 3] + 1.0F;
         float jMaxZ = boxes[jb + 5] + 1.0F;
         switch (face) {
-            case 1: // NORTH：原代码用 maxX 比 minZ（既存 bug，见上方说明）
-                return Math.abs(jMaxX - iMinZ) < 1.0E-3F && jMinY < iMaxY
+            case 1: // NORTH：邻居的 maxZ 贴着我的 minZ
+                return Math.abs(jMaxZ - iMinZ) < 1.0E-3F && jMinY < iMaxY
                         && overlap(iMinX, iMaxX, jMinX, jMaxX);
             case 2: // SOUTH
                 return Math.abs(jMinZ - iMaxZ) < 1.0E-3F && jMinY < iMaxY

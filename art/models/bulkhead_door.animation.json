@@ -1,0 +1,44 @@
+{
+	"format_version": "1.8.0",
+	"animations": {
+		"open": {
+			"animation_length": 0.6,
+			"bones": {
+				"panel": {
+					"position": {
+						"0.0": {
+							"post": [
+								"0",
+								"0",
+								"0"
+							],
+							"lerp_mode": "catmullrom"
+						},
+						"0.5833": {
+							"post": [
+								"-16",
+								"0",
+								"0"
+							],
+							"lerp_mode": "catmullrom"
+						}
+					}
+				}
+			}
+		},
+		"closed": {
+			"animation_length": 0.01,
+			"bones": {
+				"panel": {
+					"position": {
+						"0.0": [
+							"0",
+							"0",
+							"0"
+						]
+					}
+				}
+			}
+		}
+	}
+}

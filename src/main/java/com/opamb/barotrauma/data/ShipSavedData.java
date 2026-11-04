@@ -90,6 +90,12 @@ public final class ShipSavedData extends SavedData {
         /** 声纳交互代理方块的世界坐标（跟船移动；认领时恢复用）。 */
         public BlockPos proxyPos = BlockPos.ZERO;
         public float hullMultiplier = 1.0F;
+        /** 装配时的船体格数：认领后重算破口大小（destroyed 口径）的基准；0 = 旧存档未知，按当前快照大小兜底。 */
+        public int initialBlocks;
+        /** 最近一次同步时的刚体位置（仅用于认领的位置回退匹配；不是快照坐标空间，勿与 x/y/z 混用）。 */
+        public double lastX;
+        public double lastY;
+        public double lastZ;
         /** 装配快照；破损对账/焊接会改它，每 5 秒随 tick 同步进来。 */
         public final Map<Long, BlockState> snapshot = new HashMap<>();
         public final HullDamage hullDamage = new HullDamage();
@@ -103,6 +109,10 @@ public final class ShipSavedData extends SavedData {
             ship.x = pos.x;
             ship.y = pos.y;
             ship.z = pos.z;
+            ship.lastX = pos.x;
+            ship.lastY = pos.y;
+            ship.lastZ = pos.z;
+            ship.initialBlocks = blocks.size();
             for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
                 ship.snapshot.put(entry.getKey().asLong(), entry.getValue());
             }
@@ -119,6 +129,10 @@ public final class ShipSavedData extends SavedData {
             tag.putDouble("x", x);
             tag.putDouble("y", y);
             tag.putDouble("z", z);
+            tag.putDouble("lastX", lastX);
+            tag.putDouble("lastY", lastY);
+            tag.putDouble("lastZ", lastZ);
+            tag.putInt("initialBlocks", initialBlocks);
             tag.putLong("core", corePos.asLong());
             tag.putLong("proxy", proxyPos.asLong());
             tag.putFloat("multiplier", hullMultiplier);
@@ -140,6 +154,12 @@ public final class ShipSavedData extends SavedData {
             ship.x = tag.getDouble("x");
             ship.y = tag.getDouble("y");
             ship.z = tag.getDouble("z");
+            // 旧存档没有 lastX/Y/Z：回退到装配位置（老数据本来就只有这个位置可用）
+            ship.lastX = tag.contains("lastX") ? tag.getDouble("lastX") : ship.x;
+            ship.lastY = tag.contains("lastY") ? tag.getDouble("lastY") : ship.y;
+            ship.lastZ = tag.contains("lastZ") ? tag.getDouble("lastZ") : ship.z;
+            // 旧存档没有 initialBlocks（0）：认领时按当前快照大小兜底
+            ship.initialBlocks = tag.getInt("initialBlocks");
             ship.corePos = BlockPos.of(tag.getLong("core"));
             ship.proxyPos = BlockPos.of(tag.getLong("proxy"));
             ship.hullMultiplier = tag.getFloat("multiplier");

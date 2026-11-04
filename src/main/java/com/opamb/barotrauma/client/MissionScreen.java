@@ -44,6 +44,13 @@ public class MissionScreen extends AbstractContainerScreen<MissionMenu> {
     }
 
     @Override
+    protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
+        // 标题用菜单的本地化名字（中文环境=任务终端，英文环境=Mission Terminal），
+        // 不再在 renderBg 里手写中文，否则会和原版标题叠成中英文双重影（用户实测）。
+        graphics.drawString(font, title, 10, 6, ACCENT, false);
+    }
+
+    @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
         super.render(graphics, mouseX, mouseY, partialTick);
@@ -59,7 +66,6 @@ public class MissionScreen extends AbstractContainerScreen<MissionMenu> {
         graphics.fill(x, y, x + 1, y + PANEL_H, EDGE);
         graphics.fill(x + PANEL_W - 1, y, x + PANEL_W, y + PANEL_H, EDGE);
 
-        graphics.drawString(font, "任务终端", x + 10, y + 6, ACCENT, false);
         graphics.drawString(font, "Credits：" + ClientMissionCache.credits(),
                 x + PANEL_W - 90, y + 6, GREEN, false);
 

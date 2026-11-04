@@ -24,11 +24,14 @@ public final class ModMenus {
 
     public static final RegistryObject<MenuType<com.opamb.barotrauma.menu.MissionMenu>> MISSION_TERMINAL =
             MENUS.register("mission_terminal", () -> IForgeMenuType.create(
-                    (id, inv, buf) -> new com.opamb.barotrauma.menu.MissionMenu(id, buf.readBlockPos())));
+                    (id, inv, buf) -> new com.opamb.barotrauma.menu.MissionMenu(id,
+                            // 原版 openMenu 不写额外数据时 buf 为 null，直接 readBlockPos 会 NPE。
+                            buf == null ? net.minecraft.core.BlockPos.ZERO : buf.readBlockPos())));
 
     public static final RegistryObject<MenuType<com.opamb.barotrauma.menu.PumpMenu>> PUMP =
             MENUS.register("drain_pump", () -> IForgeMenuType.create(
-                    (id, inv, buf) -> new com.opamb.barotrauma.menu.PumpMenu(id, inv, buf)));
+                    (id, inv, buf) -> new com.opamb.barotrauma.menu.PumpMenu(id, inv,
+                            buf == null ? net.minecraft.core.BlockPos.ZERO : buf.readBlockPos())));
 
     private ModMenus() {
     }

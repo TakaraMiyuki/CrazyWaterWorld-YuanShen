@@ -58,6 +58,11 @@ public final class VsState {
                             double radius, float baseAmount);
     }
 
+    /** 物理船的方块状态变了（例如开门），但方块类型没变，需要重新扫一遍船坞几何。 */
+    public interface GeometryRefresh {
+        void refresh(ServerLevel level);
+    }
+
     private static volatile boolean active;
     private static volatile Probe probe;
     private static volatile Control control;
@@ -65,6 +70,7 @@ public final class VsState {
     private static volatile Damager damager;
     private static volatile Repairer repairer;
     private static volatile ExplosionDamager explosionDamager;
+    private static volatile GeometryRefresh geometryRefresh;
     private static volatile BlockPos corePos;
     private static volatile ShipState activeState;
     /** 船中心相对装配时刻的整数偏移（格）——拆船时按它把方块铺回世界。 */
@@ -130,6 +136,27 @@ public final class VsState {
         damager = newDamager;
         repairer = newRepairer;
         explosionDamager = newExplosionDamager;
+    }
+
+    /** 注册"船体方块状态变了，重扫物理船几何"的回调。由 {@link VsPilot} 初始化时调一次。 */
+    public static void installGeometryRefresh(GeometryRefresh refresh) {
+        geometryRefresh = refresh;
+    }
+
+    /**
+     * 物理船上开门/关门后调用。方块类型没变，{@code refreshHull} 不会把它当成破损，
+     * 所以必须显式重扫：打开的门格要进入舱室，客户端干区才会把门口算进船内。
+     */
+    public static void refreshGeometry(ServerLevel level) {
+        GeometryRefresh current = geometryRefresh;
+        if (!active || current == null || level == null) {
+            return;
+        }
+        try {
+            current.refresh(level);
+        } catch (Throwable ignored) {
+            // 重扫失败不能把开门的玩家卡死；下一次 tick 还会继续跑
+        }
     }
 
     /** 物理船核心方块实体在船坞里 tick 时调用。 */

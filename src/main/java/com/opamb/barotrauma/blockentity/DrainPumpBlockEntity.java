@@ -57,7 +57,17 @@ public class DrainPumpBlockEntity extends BlockEntity {
         ShipState ship = resolveShip(server, pos);
         if (ship != null) {
             ship.simulation().setDrainPump(be.enabled, be.rate);
+            // 只抽水泵自己所在的舱：物理船的方块实体活在船坞里，要换算成装配坐标。
+            ship.simulation().setDrainPumpCell(assemblyPos(server, pos));
         }
+    }
+
+    /** 物理船的方块实体在船坞坐标里；转成船状态用的装配坐标。 */
+    private static BlockPos assemblyPos(ServerLevel level, BlockPos pos) {
+        if (!VsState.active()) {
+            return pos;
+        }
+        return com.opamb.barotrauma.ship.vs.VsPilot.toAssembly(pos);
     }
 
     @Nullable

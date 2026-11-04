@@ -25,6 +25,16 @@ public final class OceanEnvironment {
     /** 船内干燥区判定。服务端用 VsPilot，客户端用 ShipWaterRenderer。 */
     public interface DryZone {
         boolean isDry(Level level, Vec3 pos);
+
+        /**
+         * 这个位置是不是在某艘船的舱室里（不管有没有进水）。
+         *
+         * <p>船舱进水后必须按"浸没"处理——哪怕船正停在哨站干燥区里。
+         * 所以先看这个，再决定要不要套用哨站的干燥判断。</p>
+         */
+        default boolean isInsideCompartment(Level level, Vec3 pos) {
+            return false;
+        }
     }
 
     // 客户端和集成服务端共用同一个 JVM（单人存档），必须分开存：
@@ -127,7 +137,7 @@ public final class OceanEnvironment {
             if (pos.x >= minX && pos.x <= maxX
                     && pos.y >= minY && pos.y <= top
                     && pos.z >= minZ && pos.z <= maxZ
-                    && pos.y > surface + 0.01F) {
+                    && (dryBox || pos.y > surface + 0.01F)) {
                 return true;
             }
         }
@@ -138,12 +148,19 @@ public final class OceanEnvironment {
      * 这个位置是否应该按“浸没”处理：在水柱内、不在哨站、也不在未进水的船舱里。
      */
     public static boolean isSubmerged(Level level, Vec3 pos) {
-        if (!isInOcean(level, pos) || isInOutpostDryZone(pos)) {
+        if (!isInOcean(level, pos)) {
             return false;
         }
         // 按 side 选干燥区：单人存档里渲染线程和集成服务端在同一进程，
         // 不能用同一份注册状态。
         DryZone zone = level.isClientSide() ? clientDryZone : serverDryZone;
+        // 船舱内部只听船的：进了水的舱哪怕停在哨站里也是浸没。
+        if (zone != null && zone.isInsideCompartment(level, pos)) {
+            return !zone.isDry(level, pos);
+        }
+        if (isInOutpostDryZone(pos)) {
+            return false;
+        }
         return zone == null || !zone.isDry(level, pos);
     }
 }

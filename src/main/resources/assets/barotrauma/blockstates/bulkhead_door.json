@@ -1,0 +1,64 @@
+{
+  "variants": {
+    "facing=north,part=lower,open=false": {
+      "model": "barotrauma:block/invisible"
+    },
+    "facing=north,part=lower,open=true": {
+      "model": "barotrauma:block/invisible"
+    },
+    "facing=north,part=upper,open=false": {
+      "model": "barotrauma:block/invisible"
+    },
+    "facing=north,part=upper,open=true": {
+      "model": "barotrauma:block/invisible"
+    },
+    "facing=east,part=lower,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 90
+    },
+    "facing=east,part=lower,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 90
+    },
+    "facing=east,part=upper,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 90
+    },
+    "facing=east,part=upper,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 90
+    },
+    "facing=south,part=lower,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 180
+    },
+    "facing=south,part=lower,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 180
+    },
+    "facing=south,part=upper,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 180
+    },
+    "facing=south,part=upper,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 180
+    },
+    "facing=west,part=lower,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 270
+    },
+    "facing=west,part=lower,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 270
+    },
+    "facing=west,part=upper,open=false": {
+      "model": "barotrauma:block/invisible",
+      "y": 270
+    },
+    "facing=west,part=upper,open=true": {
+      "model": "barotrauma:block/invisible",
+      "y": 270
+    }
+  }
+}

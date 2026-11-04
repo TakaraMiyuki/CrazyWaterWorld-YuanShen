@@ -1,0 +1,661 @@
+{
+  "file": "hatch.bbmodel",
+  "operations": [
+    {
+      "op": "add_group",
+      "name": "panel",
+      "origin": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "op": "add_cube",
+      "name": "floor_hazard_left",
+      "from": [
+        -23,
+        7.5,
+        -7
+      ],
+      "to": [
+        -21,
+        8.5,
+        7
+      ],
+      "parent": "panel",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "floor_panel",
+      "from": [
+        -21,
+        7.5,
+        -7
+      ],
+      "to": [
+        21,
+        8.5,
+        7
+      ],
+      "parent": "panel",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            16,
+            0,
+            32,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            16,
+            0,
+            32,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            16,
+            16,
+            32,
+            32
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            16,
+            0,
+            32,
+            16
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "floor_hazard_right",
+      "from": [
+        21,
+        7.5,
+        -7
+      ],
+      "to": [
+        23,
+        8.5,
+        7
+      ],
+      "parent": "panel",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            32,
+            0,
+            48,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "floor_latch",
+      "from": [
+        -1,
+        8.5,
+        -2
+      ],
+      "to": [
+        1,
+        9.5,
+        2
+      ],
+      "parent": "panel",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            32,
+            16,
+            48,
+            32
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            48,
+            0,
+            64,
+            16
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_group",
+      "name": "frame",
+      "origin": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "op": "add_cube",
+      "name": "rim_north",
+      "from": [
+        -24,
+        7.5,
+        -8
+      ],
+      "to": [
+        24,
+        8.5,
+        -7
+      ],
+      "parent": "frame",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            32,
+            16,
+            48,
+            32
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "rim_south",
+      "from": [
+        -24,
+        7.5,
+        7
+      ],
+      "to": [
+        24,
+        8.5,
+        8
+      ],
+      "parent": "frame",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            32,
+            16,
+            48,
+            32
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "rim_west",
+      "from": [
+        -24,
+        7.5,
+        -7
+      ],
+      "to": [
+        -23,
+        8.5,
+        7
+      ],
+      "parent": "frame",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            32,
+            16,
+            48,
+            32
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "add_cube",
+      "name": "rim_east",
+      "from": [
+        23,
+        7.5,
+        -7
+      ],
+      "to": [
+        24,
+        8.5,
+        7
+      ],
+      "parent": "frame",
+      "box_uv": false,
+      "faces": {
+        "north": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "south": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "east": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "west": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "up": {
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ],
+          "texture": "hatch"
+        },
+        "down": {
+          "uv": [
+            32,
+            16,
+            48,
+            32
+          ],
+          "texture": "hatch"
+        }
+      }
+    },
+    {
+      "op": "set_model_properties",
+      "name": "hatch",
+      "model_identifier": "geometry.hatch",
+      "resolution": {
+        "width": 64,
+        "height": 64
+      }
+    },
+    {
+      "op": "add_animation",
+      "name": "open",
+      "length": 0.8,
+      "loop": "once",
+      "snapping": 24
+    },
+    {
+      "op": "add_animation",
+      "name": "closed",
+      "length": 0.01,
+      "loop": "once",
+      "snapping": 24
+    },
+    {
+      "op": "set_keyframe",
+      "animation": "closed",
+      "bone": "panel",
+      "channel": "position",
+      "time": 0.0,
+      "value": [
+        0,
+        0,
+        0
+      ],
+      "interpolation": "linear"
+    },
+    {
+      "op": "set_keyframe",
+      "animation": "open",
+      "bone": "panel",
+      "channel": "position",
+      "time": 0.0,
+      "value": [
+        0,
+        0,
+        0
+      ],
+      "interpolation": "catmullrom"
+    },
+    {
+      "op": "set_keyframe",
+      "animation": "open",
+      "bone": "panel",
+      "channel": "position",
+      "time": 0.8,
+      "value": [
+        48.0,
+        0,
+        0
+      ],
+      "interpolation": "catmullrom"
+    }
+  ]
+}

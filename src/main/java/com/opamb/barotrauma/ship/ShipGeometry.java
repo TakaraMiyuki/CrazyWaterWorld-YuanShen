@@ -5,8 +5,10 @@ import net.minecraft.core.BlockPos;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -30,6 +32,32 @@ public final class ShipGeometry {
         boolean isSolid(BlockPos pos);
 
         boolean isWater(BlockPos pos);
+
+        /**
+         * 门/舱口格：算舱内（能站人、算干燥区），但<b>水不能穿过</b>。
+         *
+         * <p>门板只有 1 px 厚，可它按格子算体积；关着门时这一格是水密隔断，
+         * 但玩家贴着门站在这一格里不应该被当成"舱外"。所以洪水填充会走进这一格、
+         * 把它算进某一侧的舱室，却不会从这一格继续往外扩。</p>
+         */
+        default boolean isDoorway(BlockPos pos) {
+            return false;
+        }
+
+        /** 开着的门：两侧不合并舱室，只按限速流量互相补水（见 DoorLink）。 */
+        default boolean isOpenDoorway(BlockPos pos) {
+            return false;
+        }
+    }
+
+    /**
+     * 开着的门带来的两侧水连通。
+     *
+     * <p>{@code body} / {@code other} 是"水体下标"：先密闭舱室（0..n-1），再连海空腔
+     * （n..n+m-1），和 {@link ShipSimulation} 的数组下标一致。门格本身属于
+     * {@code body}，{@code other} 是门另一侧相邻的水体。</p>
+     */
+    public record DoorLink(BlockPos cell, int body, int other, boolean open) {
     }
 
     /** 一个封闭舱室。 */
@@ -70,7 +98,8 @@ public final class ShipGeometry {
 
     /** 扫描结果。{@code openPockets} 是连到外海的空腔。 */
     public record Result(List<Compartment> compartments, List<Compartment> openPockets,
-                         int hullBlocks, int scannedCells, Bounds bounds, Set<BlockPos> hull) {
+                         int hullBlocks, int scannedCells, Bounds bounds, Set<BlockPos> hull,
+                         List<DoorLink> doorLinks) {
         public int totalVolume() {
             return compartments.stream().mapToInt(Compartment::volume).sum();
         }
@@ -91,8 +120,13 @@ public final class ShipGeometry {
             for (BlockPos pos : hull) {
                 movedHull.add(pos.offset(dx, dy, dz));
             }
+            List<DoorLink> movedDoors = new ArrayList<>(doorLinks.size());
+            for (DoorLink link : doorLinks) {
+                movedDoors.add(new DoorLink(link.cell().offset(dx, dy, dz),
+                        link.body(), link.other(), link.open()));
+            }
             return new Result(shift(compartments, dx, dy, dz), shift(openPockets, dx, dy, dz),
-                    hullBlocks, scannedCells, bounds.shifted(dx, dy, dz), movedHull);
+                    hullBlocks, scannedCells, bounds.shifted(dx, dy, dz), movedHull, movedDoors);
         }
 
         private static List<Compartment> shift(List<Compartment> source, int dx, int dy, int dz) {
@@ -124,7 +158,7 @@ public final class ShipGeometry {
         Set<BlockPos> hull = collectHull(core, radius, isShipBlock);
         if (hull.isEmpty()) {
             return new Result(List.of(), List.of(), 0, 0, new Bounds(core.getX(), core.getY(), core.getZ(),
-                    core.getX(), core.getY(), core.getZ()), Set.of());
+                    core.getX(), core.getY(), core.getZ()), Set.of(), List.of());
         }
 
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
@@ -142,6 +176,7 @@ public final class ShipGeometry {
         List<Compartment> compartments = new ArrayList<>();
         List<Compartment> openPockets = new ArrayList<>();
         Set<BlockPos> visited = new HashSet<>();
+        Set<BlockPos> doorways = new HashSet<>();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         int scanned = 0;
 
@@ -150,10 +185,10 @@ public final class ShipGeometry {
                 for (int z = minZ; z <= maxZ; z++) {
                     cursor.set(x, y, z);
                     BlockPos pos = cursor.immutable();
-                    if (visited.contains(pos) || probe.isSolid(pos)) {
+                    if (visited.contains(pos) || (probe.isSolid(pos) && !probe.isDoorway(pos))) {
                         continue;
                     }
-                    Flood flood = flood(pos, minX, minY, minZ, maxX, maxY, maxZ, probe, visited);
+                    Flood flood = flood(pos, minX, minY, minZ, maxX, maxY, maxZ, probe, visited, doorways);
                     if (flood == null) {
                         continue;
                     }
@@ -167,8 +202,91 @@ public final class ShipGeometry {
                 }
             }
         }
+        // 门格优先归"密闭舱室"：贴着门站的那一侧得算干燥区，不能归到进水空腔里。
+        preferSealedDoorOwners(compartments, openPockets, doorways);
+        List<DoorLink> doorLinks = collectDoorLinks(doorways, compartments, openPockets, probe);
         return new Result(compartments, openPockets, hull.size(), scanned,
-                new Bounds(minX, minY, minZ, maxX, maxY, maxZ), hull);
+                new Bounds(minX, minY, minZ, maxX, maxY, maxZ), hull, doorLinks);
+    }
+
+    /** 把被连海空腔占走的门格挪给相邻的密闭舱室（先按邻居找，找不到就留着）。 */
+    private static void preferSealedDoorOwners(List<Compartment> compartments,
+                                               List<Compartment> pockets, Set<BlockPos> doorways) {
+        if (doorways.isEmpty() || compartments.isEmpty() || pockets.isEmpty()) {
+            return;
+        }
+        Map<BlockPos, Compartment> sealedOf = new HashMap<>();
+        for (Compartment compartment : compartments) {
+            for (BlockPos cell : compartment.cells()) {
+                sealedOf.putIfAbsent(cell, compartment);
+            }
+        }
+        for (BlockPos door : doorways) {
+            Compartment owner = null;
+            for (Compartment pocket : pockets) {
+                if (pocket.cells().contains(door)) {
+                    owner = pocket;
+                    break;
+                }
+            }
+            if (owner == null) {
+                continue;
+            }
+            Compartment sealed = null;
+            for (BlockPos next : neighbours(door)) {
+                Compartment candidate = sealedOf.get(next);
+                if (candidate != null) {
+                    sealed = candidate;
+                    break;
+                }
+            }
+            if (sealed != null) {
+                owner.cells().remove(door);
+                sealed.cells().add(door);
+                sealedOf.put(door, sealed);
+            }
+        }
+    }
+
+    /** 门格两侧的水体连线；关着的门也记下来（open=false），开合只改这一位。 */
+    private static List<DoorLink> collectDoorLinks(Set<BlockPos> doorways,
+                                                   List<Compartment> compartments,
+                                                   List<Compartment> pockets, Probe probe) {
+        if (doorways.isEmpty()) {
+            return List.of();
+        }
+        Map<BlockPos, Integer> bodyOf = new HashMap<>();
+        for (int i = 0; i < compartments.size(); i++) {
+            for (BlockPos cell : compartments.get(i).cells()) {
+                bodyOf.putIfAbsent(cell, i);
+            }
+        }
+        int pocketOffset = compartments.size();
+        for (int j = 0; j < pockets.size(); j++) {
+            for (BlockPos cell : pockets.get(j).cells()) {
+                bodyOf.putIfAbsent(cell, pocketOffset + j);
+            }
+        }
+        List<DoorLink> links = new ArrayList<>();
+        for (BlockPos door : doorways) {
+            Integer owner = bodyOf.get(door);
+            if (owner == null) {
+                continue;
+            }
+            // 一个门格可能同时贴着两个水体（三个格子宽的舱口下方是两个舱），都要连。
+            Set<Integer> others = new java.util.LinkedHashSet<>();
+            for (BlockPos next : neighbours(door)) {
+                Integer other = bodyOf.get(next);
+                if (other != null && !other.equals(owner)) {
+                    others.add(other);
+                }
+            }
+            boolean open = probe.isOpenDoorway(door);
+            for (Integer other : others) {
+                links.add(new DoorLink(door, owner, other, open));
+            }
+        }
+        return links;
     }
 
     /**
@@ -258,7 +376,7 @@ public final class ShipGeometry {
     }
 
     private static Flood flood(BlockPos start, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
-                               Probe probe, Set<BlockPos> visited) {
+                               Probe probe, Set<BlockPos> visited, Set<BlockPos> doorways) {
         Set<BlockPos> cells = new HashSet<>();
         Deque<BlockPos> queue = new ArrayDeque<>();
         queue.add(start);
@@ -272,10 +390,19 @@ public final class ShipGeometry {
             if (probe.isWater(pos)) {
                 water++;
             }
-            if (pos.getX() == minX || pos.getX() == maxX
+            // 门格本身是水密的：门板就装在外壳上时，不能因为它贴着包围盒边界
+            // 就把整个舱判成"连海"（那样关门也会进水）。
+            if (!probe.isDoorway(pos)
+                    && (pos.getX() == minX || pos.getX() == maxX
                     || pos.getY() == minY || pos.getY() == maxY
-                    || pos.getZ() == minZ || pos.getZ() == maxZ) {
+                    || pos.getZ() == minZ || pos.getZ() == maxZ)) {
                 touches = true;
+            }
+            // 门格算舱内，但水/空气都不能从这里继续扩：关着是一条水密隔断，
+            // 开着也只按 DoorLink 的限速流量过水，不把两个舱并成一个。
+            if (probe.isDoorway(pos)) {
+                doorways.add(pos.immutable());
+                continue;
             }
             for (BlockPos next : neighbours(pos)) {
                 if (next.getX() < minX || next.getX() > maxX
@@ -283,7 +410,10 @@ public final class ShipGeometry {
                         || next.getZ() < minZ || next.getZ() > maxZ) {
                     continue;
                 }
-                if (visited.contains(next) || probe.isSolid(next)) {
+                if (visited.contains(next)) {
+                    continue;
+                }
+                if (probe.isSolid(next) && !probe.isDoorway(next)) {
                     continue;
                 }
                 visited.add(next);

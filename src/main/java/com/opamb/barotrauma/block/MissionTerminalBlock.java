@@ -32,7 +32,11 @@ public class MissionTerminalBlock extends Block {
     public InteractionResult use(BlockState state, Level level, BlockPos pos,
                                  Player player, InteractionHand hand, BlockHitResult hit) {
         if (!level.isClientSide() && player instanceof ServerPlayer serverPlayer) {
-            serverPlayer.openMenu(new MissionMenu.Provider(pos));
+            // 必须用 Forge 的 openScreen 把终端坐标写进额外数据：原版 openMenu 不写 buf，
+            // 客户端 IForgeMenuType 工厂拿到 null → MissionMenu 构造时 buf.readBlockPos()
+            // 直接 NPE，界面根本打不开（任务/商店全都不显示）。
+            net.minecraftforge.network.NetworkHooks.openScreen(serverPlayer,
+                    new MissionMenu.Provider(pos), buf -> buf.writeBlockPos(pos));
             ModNetwork.sendToPlayer(serverPlayer, MissionStatePacket.build(serverPlayer, level));
         }
         return InteractionResult.sidedSuccess(level.isClientSide());

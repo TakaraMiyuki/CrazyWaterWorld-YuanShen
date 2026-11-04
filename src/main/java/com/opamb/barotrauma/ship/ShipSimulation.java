@@ -62,9 +62,15 @@ public final class ShipSimulation {
     private double ballast;
     private double ballastCapacity;
     private boolean pumpOut = true;
-    /** 独立排水泵（排水泵方块控制）：开关 + 速率（单位/秒，1 格 = 100 单位）。 */
+    /** 独立排水泵方块控制：开关 + 速率（单位/秒，1 格 = 100 单位）。 */
     private boolean drainPumpEnabled;
     private double drainPumpRate = 600.0D;
+    /** 排水泵所在格（装配坐标）：只抽这个格子所在的舱。 */
+    private net.minecraft.core.BlockPos drainPumpCell;
+    /** 格子 → 水体下标的缓存；换几何时整个 simulated 对象会重建，缓存自然失效。 */
+    private java.util.Map<net.minecraft.core.BlockPos, Integer> bodyIndexOfCell;
+    /** 临时诊断计数。 */
+    private int pumpDebugTicks;
     /**
      * 破口格数。洞越大进水越快——潜渊症按 Gap 的开口面积算，
      * 我们先按"被砸掉的船体格数"线性放大，至少 1 格。
@@ -144,6 +150,7 @@ public final class ShipSimulation {
         this.pumpOut = old.pumpOut;
         this.drainPumpEnabled = old.drainPumpEnabled;
         this.drainPumpRate = old.drainPumpRate;
+        this.drainPumpCell = old.drainPumpCell;
         this.airlockPhase = old.airlockPhase;
         this.airlockWater = old.airlockWater;
         this.airlockCycles = old.airlockCycles;
@@ -189,6 +196,19 @@ public final class ShipSimulation {
             }
         }
     }
+
+    /**
+     * 开着的门每秒能过多水（单位/秒/格）。
+     *
+     * <p>原版 {@code Gap.GetWaterFlowFromOutside} 是 {@code 500 * Size * open²}
+     * （Size 是门缝像素宽），房间之间的过水量则是 {@code Δ压力 * 300 * (Size/100) * dt}。
+     * 换算成我们的单位（1 格 = 100）后，一扇 1×2 的门每秒大约能过几十格³，开门后
+     * 水是"涌"进来的，几秒钟就拉平，而不是细水长流。3000 单位/格/秒 = 30 格³/秒/格。</p>
+     */
+    private static final double DOOR_FLOW_PER_CELL = 3000.0D;
+
+    /** 水位差小于这个值就当已经平了，不再过水（避免无限微流）。 */
+    private static final double DOOR_FLOW_DEADBAND = 0.02D;
 
     /** 第 index 个连海空腔当前水量（单位）。 */
     public double pocketWater(int index) {
@@ -259,20 +279,34 @@ public final class ShipSimulation {
             ballast += Math.max(0.0D, add);
         }
 
-        // 排水泵方块：独立电动泵，不吃反应堆供电（MVP：五台机器已删）。
-        // 先抽密闭舱室，再抽连海空腔（破口舱室）——后者同时还在被 tickSeaFlood 灌水，
-        // 抽排速度和进水速度形成平衡：泵只能延缓沉没，堵不上洞就救不了船。
+        // 排水泵方块：只抽自己所在的那个舱（原版水泵也是这样——关上的门后面
+        // 的水泵不归它管）。旧实现是把全船的水按顺序抽一遍，用户实测"门关着水还能
+        // 被泵出去"。水泵位置由方块实体每 tick 报上来（物理船是装配坐标）。
         if (drainPumpEnabled && drainPumpRate > 0.0D) {
-            double drain = drainPumpRate * dt;
-            for (int i = 0; i < water.length && drain > 0.0D; i++) {
-                double take = Math.min(water[i], drain);
-                water[i] -= take;
-                drain -= take;
+            int body = pumpBody();
+            if (body >= 0) {
+                double take = Math.min(bodyWater(body), drainPumpRate * dt);
+                if (take > 0.0D) {
+                    removeBodyWater(body, take);
+                }
             }
-            for (int i = 0; i < pocketWater.length && drain > 0.0D; i++) {
-                double take = Math.min(pocketWater[i], drain);
-                pocketWater[i] -= take;
-                drain -= take;
+            // 临时诊断：水泵到底抽的是哪个水体，以及它六个邻居分别属于哪个水体。
+            if (++pumpDebugTicks % 20 == 0) {
+                StringBuilder around = new StringBuilder();
+                if (drainPumpCell != null) {
+                    net.minecraft.core.BlockPos[] sides = {drainPumpCell.above(),
+                            drainPumpCell.below(), drainPumpCell.north(),
+                            drainPumpCell.south(), drainPumpCell.east(), drainPumpCell.west()};
+                    String[] names = {"上", "下", "北", "南", "东", "西"};
+                    for (int i = 0; i < sides.length; i++) {
+                        around.append(names[i]).append('=').append(bodyOf(sides[i])).append(' ');
+                    }
+                }
+                com.opamb.barotrauma.BarotraumaMod.LOGGER.info(
+                        "[pump] 泵格={} 抽出水体={} 水体水={} 邻居[{}] 密闭总水={} 连海总水={}",
+                        drainPumpCell, body, Math.round(bodyWater(Math.max(0, body))),
+                        around.toString().trim(), Math.round(waterUnits()),
+                        Math.round(pocketWaterTotal()));
             }
         }
 
@@ -335,6 +369,156 @@ public final class ShipSimulation {
         }
     }
 
+    // ------------------------------------------------------------------ 门两侧的水
+
+    /**
+     * 水体下标（{@link ShipGeometry.DoorLink} 用的那套）：先密闭舱室 0..n-1，
+     * 再连海空腔 n..n+m-1。
+     */
+    public int bodyCount() {
+        return water.length + pocketWater.length;
+    }
+
+    /** 第 body 个水体的水位（格）。连海空腔按整块水位的近似值算。 */
+    public double bodyLevel(int body) {
+        List<ShipGeometry.Compartment> sealed = geometry.compartments();
+        if (body >= 0 && body < sealed.size()) {
+            return ShipWaterStateBuilder.surfaceOf(sealed.get(body), water[body]);
+        }
+        int pocket = body - sealed.size();
+        List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        if (pocket >= 0 && pocket < pockets.size()) {
+            return ShipWaterStateBuilder.surfaceOf(pockets.get(pocket), pocketWater[pocket]);
+        }
+        return 0.0D;
+    }
+
+    /** 第 body 个水体的格子数。 */
+    public int bodyVolume(int body) {
+        List<ShipGeometry.Compartment> sealed = geometry.compartments();
+        if (body >= 0 && body < sealed.size()) {
+            return sealed.get(body).volume();
+        }
+        int pocket = body - sealed.size();
+        List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        if (pocket >= 0 && pocket < pockets.size()) {
+            return pockets.get(pocket).volume();
+        }
+        return 0;
+    }
+
+    /** 第 body 个水体现在的水量（单位）。 */
+    public double bodyWater(int body) {
+        if (body >= 0 && body < water.length) {
+            return water[body];
+        }
+        int pocket = body - water.length;
+        if (pocket >= 0 && pocket < pocketWater.length) {
+            return pocketWater[pocket];
+        }
+        return 0.0D;
+    }
+
+    /**
+     * 开着的门按限速把高水位一侧的水挪到低水位一侧。
+     *
+     * <p>这一步是"开门之后水慢慢流过去"，而不是把两个舱并成一个（并舱会让水位
+     * 瞬间均摊，关回来时水又整体跑到漏水侧）。关门没有 DoorLink，各自的水原地
+     * 不动；开门每秒最多搬 {@link #DOOR_FLOW_PER_CELL} × 门格数，直到水位差进死区。</p>
+     */
+    public void tickDoorFlow(double dt) {
+        List<ShipGeometry.DoorLink> links = geometry.doorLinks();
+        if (links.isEmpty() || dt <= 0.0D) {
+            return;
+        }
+        java.util.Map<Integer, Double> levels = new java.util.HashMap<>();
+        for (ShipGeometry.DoorLink link : links) {
+            if (!link.open() || link.body() == link.other()) {
+                continue;
+            }
+            int a = link.body();
+            int b = link.other();
+            double la = levels.computeIfAbsent(a, this::bodyLevel);
+            double lb = levels.computeIfAbsent(b, this::bodyLevel);
+            double diff = la - lb;
+            if (Math.abs(diff) <= DOOR_FLOW_DEADBAND) {
+                continue;
+            }
+            boolean aHigh = diff > 0.0D;
+            int high = aHigh ? a : b;
+            int low = aHigh ? b : a;
+            // 想把水位差抹平需要搬的量（按两侧格子数估算）；不够一格时按比例。
+            double highCells = Math.max(1, bodyVolume(high));
+            double lowCells = Math.max(1, bodyVolume(low));
+            double needBlocks = Math.abs(diff) * (highCells * lowCells) / (highCells + lowCells);
+            double units = Math.min(needBlocks * UNITS_PER_BLOCK, DOOR_FLOW_PER_CELL * dt);
+            units = Math.min(units, bodyWater(high));
+            if (units <= 0.05D) {
+                continue;
+            }
+            removeBodyWater(high, units);
+            addBodyWater(low, units);
+            levels.put(high, bodyLevel(high));
+            levels.put(low, bodyLevel(low));
+        }
+    }
+
+    private void removeBodyWater(int body, double units) {
+        if (body >= 0 && body < water.length) {
+            water[body] = Math.max(0.0D, water[body] - units);
+            return;
+        }
+        int pocket = body - water.length;
+        if (pocket >= 0 && pocket < pocketWater.length) {
+            pocketWater[pocket] = Math.max(0.0D, pocketWater[pocket] - units);
+        }
+    }
+
+    private void addBodyWater(int body, double units) {
+        if (body >= 0 && body < water.length) {
+            double capacity = volumes[body] * UNITS_PER_BLOCK;
+            water[body] = Math.min(capacity, water[body] + units);
+            return;
+        }
+        int pocket = body - water.length;
+        List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+        if (pocket >= 0 && pocket < pocketWater.length && pocket < pockets.size()) {
+            double capacity = pockets.get(pocket).volume() * UNITS_PER_BLOCK;
+            pocketWater[pocket] = Math.min(capacity, pocketWater[pocket] + units);
+        }
+    }
+
+    /**
+     * 按"每一格里的水"重建水量。
+     *
+     * <p>重扫（砸洞、开关门）会重建舱室数组。老的 {@link #seedWater} 只把总水量按
+     * 容积比例重新分配，于是：开门（两舱合并）再关门（重新拆开）时，全部水会被
+     * 算到"漏水侧"、完好侧被清空。这里改成按格子搬运——每格保留自己那一份，
+     * 拆舱/并舱都不会凭空搬水。</p>
+     */
+    public void seedWaterByCell(java.util.Map<net.minecraft.core.BlockPos, Double> byCell,
+                                ShipGeometry.Result next) {
+        if (byCell == null || byCell.isEmpty()) {
+            return;
+        }
+        List<ShipGeometry.Compartment> sealed = next.compartments();
+        for (int i = 0; i < water.length && i < sealed.size(); i++) {
+            double sum = 0.0D;
+            for (net.minecraft.core.BlockPos cell : sealed.get(i).cells()) {
+                sum += byCell.getOrDefault(cell, 0.0D);
+            }
+            water[i] = Math.min(volumes[i] * UNITS_PER_BLOCK, sum);
+        }
+        List<ShipGeometry.Compartment> pockets = next.openPockets();
+        for (int i = 0; i < pocketWater.length && i < pockets.size(); i++) {
+            double sum = 0.0D;
+            for (net.minecraft.core.BlockPos cell : pockets.get(i).cells()) {
+                sum += byCell.getOrDefault(cell, 0.0D);
+            }
+            pocketWater[i] = Math.min(pockets.get(i).volume() * UNITS_PER_BLOCK, sum);
+        }
+    }
+
     public void setPumpOut(boolean pumpOut) {
         this.pumpOut = pumpOut;
     }
@@ -343,6 +527,51 @@ public final class ShipSimulation {
     public void setDrainPump(boolean enabled, double rate) {
         this.drainPumpEnabled = enabled;
         this.drainPumpRate = Math.max(100.0D, Math.min(3000.0D, rate));
+    }
+
+    /** 排水泵的位置（装配坐标）：只抽这一格所在的舱。 */
+    public void setDrainPumpCell(net.minecraft.core.BlockPos cell) {
+        this.drainPumpCell = cell == null ? null : cell.immutable();
+    }
+
+    /** 排水泵所在的那个水体：泵本身是实心方块，取它旁边那一格舱室。 */
+    private int pumpBody() {
+        int body = bodyOf(drainPumpCell);
+        if (body >= 0 || drainPumpCell == null) {
+            return body;
+        }
+        for (net.minecraft.core.BlockPos next : new net.minecraft.core.BlockPos[]{
+                drainPumpCell.above(), drainPumpCell.below(), drainPumpCell.north(),
+                drainPumpCell.south(), drainPumpCell.east(), drainPumpCell.west()}) {
+            body = bodyOf(next);
+            if (body >= 0) {
+                return body;
+            }
+        }
+        return -1;
+    }
+
+    /** 这一格在第几个水体里（0..n-1 密闭舱室，n.. 连海空腔）；不在任何舱里返回 -1。 */
+    public int bodyOf(net.minecraft.core.BlockPos cell) {
+        if (cell == null) {
+            return -1;
+        }
+        if (bodyIndexOfCell == null) {
+            bodyIndexOfCell = new java.util.HashMap<>();
+            List<ShipGeometry.Compartment> sealed = geometry.compartments();
+            for (int i = 0; i < sealed.size(); i++) {
+                for (net.minecraft.core.BlockPos pos : sealed.get(i).cells()) {
+                    bodyIndexOfCell.putIfAbsent(pos, i);
+                }
+            }
+            List<ShipGeometry.Compartment> pockets = geometry.openPockets();
+            for (int j = 0; j < pockets.size(); j++) {
+                for (net.minecraft.core.BlockPos pos : pockets.get(j).cells()) {
+                    bodyIndexOfCell.putIfAbsent(pos, sealed.size() + j);
+                }
+            }
+        }
+        return bodyIndexOfCell.getOrDefault(cell, -1);
     }
 
     public ShipGeometry.Result geometry() {

@@ -56,6 +56,8 @@ class ShipDrainPumpTest {
     @Test
     void 按速率抽密闭舱室的水() {
         ShipSimulation sim = simulation(sealedCube());
+        // 水泵只抽自己所在的那个水体（见 ShipSimulation.pumpBody），必须给泵格。
+        sim.setDrainPumpCell(new BlockPos(0, 0, 0));
         sim.flood(0, 1000.0D);
         assertEquals(1000.0D, sim.waterUnits(), 1.0E-6);
 
@@ -78,6 +80,7 @@ class ShipDrainPumpTest {
     @Test
     void 不会抽成负数且能抽连海空腔() {
         ShipSimulation sim = simulation(breachedCube());
+        sim.setDrainPumpCell(new BlockPos(0, 0, 0));
         // 破口空腔里先灌 500 单位（flood 只作用于密闭舱室，连海空腔要用 seedWater）
         assertEquals(1, sim.geometry().openPockets().size());
         sim.seedWater(0.0D, 500.0D);

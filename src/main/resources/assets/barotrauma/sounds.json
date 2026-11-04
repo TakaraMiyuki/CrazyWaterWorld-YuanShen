@@ -1,0 +1,11 @@
+{
+  "door_toggle": {
+    "subtitle": "subtitles.barotrauma.door_toggle",
+    "sounds": [
+      "barotrauma:door/door1",
+      "barotrauma:door/door2",
+      "barotrauma:door/door3",
+      "barotrauma:door/door4"
+    ]
+  }
+}
