@@ -1593,6 +1593,19 @@ public final class VsPilot {
             if (proxyPos != null) {
                 record.proxyPos = proxyPos;
             }
+            // 位置回退匹配用的"最后已知位置"：跟刚体当前位置走。
+            // 不能写 record.x/y/z——那是快照坐标空间的装配锚点，动它会破坏破口的世界→快照映射。
+            try {
+                ServerShip live = view(level);
+                if (live != null) {
+                    Vec3 now = VsBridge.position(live);
+                    record.lastX = now.x;
+                    record.lastY = now.y;
+                    record.lastZ = now.z;
+                }
+            } catch (Throwable ignored) {
+                // 读不到就保留上一次的已知位置
+            }
             data.setDirty();
         } catch (Throwable error) {
             LOGGER.warn("[vs] 同步装配记录失败：{}", error.toString());
@@ -1637,11 +1650,23 @@ public final class VsPilot {
         }
         ServerShip found = VsBridge.ensureShipDataLoaded(level, record.vsShipId);
         if (found == null) {
-            found = VsBridge.nearestShip(level, record.x, record.y, record.z,
+            // 用"最后已知位置"而不是装配位置：船开出去再停服的话，装配原点早就不是船所在了
+            found = VsBridge.nearestShip(level, record.lastX, record.lastY, record.lastZ,
                     ADOPT_POSITION_TOLERANCE);
         }
         if (found != null) {
-            adopt(level, record, found);
+            // 认领路径抛任何异常都不许带崩启动（这里跑在 ServerStarted 的下一 tick 主线程）：
+            // 清记录降级为无物理船，宁可少一艘船，不要开不起服
+            try {
+                adopt(level, record, found);
+            } catch (Throwable error) {
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），清除记录", record.vsShipId, error.toString());
+                try {
+                    ShipSavedData.get(level).clearAssembled();
+                } catch (Throwable ignored) {
+                    // 清不掉记录也不影响启动
+                }
+            }
             pendingAdoption = null;
             return;
         }
@@ -1664,15 +1689,34 @@ public final class VsPilot {
         }
         ServerShip found = VsBridge.ensureShipDataLoaded(level, pendingAdoption.vsShipId);
         if (found == null) {
-            found = VsBridge.nearestShip(level, pendingAdoption.x, pendingAdoption.y,
-                    pendingAdoption.z, ADOPT_POSITION_TOLERANCE);
+            found = VsBridge.nearestShip(level, pendingAdoption.lastX, pendingAdoption.lastY,
+                    pendingAdoption.lastZ, ADOPT_POSITION_TOLERANCE);
         }
         if (found != null) {
-            adopt(level, pendingAdoption, found);
+            // 与 adoptFromSave 相同的兜底：认领异常清记录降级，不带崩 tick 循环
+            try {
+                adopt(level, pendingAdoption, found);
+            } catch (Throwable error) {
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），清除记录",
+                        pendingAdoption.vsShipId, error.toString());
+                try {
+                    ShipSavedData.get(level).clearAssembled();
+                } catch (Throwable ignored) {
+                    // 清不掉记录也不影响 tick
+                }
+            }
             pendingAdoption = null;
             return;
         }
         if (level.getGameTime() > adoptDeadlineGameTime) {
+            // 铺方块前的终检：VS2 里其实还有这艘船的数据（只是没加载/没认领成功）就继续等。
+            // 否则刚体稍后加载成功，世界方块 + 幽灵刚体两份船，且记录已清、无人再管。
+            if (VsBridge.shipDataExists(level, pendingAdoption.vsShipId)) {
+                adoptDeadlineGameTime = level.getGameTime() + ADOPT_RETRY_TICKS;
+                LOGGER.warn("[vs] 超时但 VS2 里仍有该船数据，延长 {} 秒继续等待认领",
+                        ADOPT_RETRY_TICKS / 20L);
+                return;
+            }
             LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体，按丢失处理", ADOPT_RETRY_TICKS / 20L);
             restoreRecordBlocks(level, pendingAdoption);
             try {
@@ -1790,12 +1834,17 @@ public final class VsPilot {
             }
         }
         rebuilt.addBreaches(breached);
-        rebuilt.simulation().setBreachSize(Math.max(1, breached.size()));
+        // 破口大小与 live 路径（refreshHull :790）同口径：被整格打掉的格 + 快照里 BREACHED 状态的格。
+        // 只数 breached 会漏掉打穿的洞——重启后进水比重启前慢，且此后每次重扫的 destroyed 都从 0 起算。
+        // initialBlocks<=0 是旧存档（无该字段），按当前快照大小兜底（与原行为一致）。
+        int initial = record.initialBlocks > 0 ? record.initialBlocks : snap.size();
+        int destroyed = Math.max(0, initial - snap.size());
+        rebuilt.simulation().setBreachSize(Math.max(1, destroyed + breached.size()));
 
         ship = found;
         state = rebuilt;
         snapshot = snap;
-        initialShipBlocks = snap.size();
+        initialShipBlocks = initial;
         corePos = core;
         sonarAnchor = core;
         proxyPos = record.proxyPos;

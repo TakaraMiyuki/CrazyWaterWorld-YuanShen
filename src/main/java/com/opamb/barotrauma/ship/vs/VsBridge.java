@@ -343,4 +343,19 @@ public final class VsBridge {
             return null;
         }
     }
+
+    /**
+     * 刚体数据是否还存在（含未加载的数据船）——超时兜底铺方块前的终检。
+     *
+     * <p>铺回快照是不可逆动作：如果 VS2 里其实还有这艘船（只是懒加载没完成或
+     * 认领失败），铺了就是"世界方块 + 幽灵刚体"两份船。终检存在就继续等。</p>
+     */
+    public static boolean shipDataExists(ServerLevel level, long id) {
+        try {
+            VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
+            return world != null && world.getAllShips().getById(id) != null;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
 }
