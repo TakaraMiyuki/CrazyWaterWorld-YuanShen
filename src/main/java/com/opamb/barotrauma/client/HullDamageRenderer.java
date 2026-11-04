@@ -1,5 +1,6 @@
 package com.opamb.barotrauma.client;
 
+import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -175,12 +176,21 @@ public final class HullDamageRenderer {
 
     // ------------------------------------------------------------------ 裂痕
 
+    /**
+     * 裂痕/血条各自复用一个 builder（同 vanilla {@code renderBuffers()} 的用法：每帧
+     * getBuffer→endBatch）。之前每帧 {@code new BufferBuilder} 的 direct 内存要等 GC
+     * 才释放，长时间游玩必然 native OOM（实测 8 分钟 {@code Failed to allocate ... bytes}）。
+     */
+    private static final BufferBuilder CRACK_BUILDER = new BufferBuilder(65536);
+    private static final MultiBufferSource.BufferSource CRACK_BUFFERS =
+            MultiBufferSource.immediate(CRACK_BUILDER);
+    private static final BufferBuilder BAR_BUILDER = new BufferBuilder(8192);
+    private static final MultiBufferSource.BufferSource BAR_BUFFERS =
+            MultiBufferSource.immediate(BAR_BUILDER);
+
     private static void drawCracks(Minecraft mc, Matrix4f matrix, List<Target> targets,
                                    Matrix4d toWorld, Vec3 cameraPos) {
-        // 共享 buffer：不要再 new BufferBuilder(65536)，否则 native 内存会越积越多。
-        MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
-        VertexConsumer vertices = buffers.getBuffer(CRACK_TYPE);
-        boolean any = false;
+        VertexConsumer vertices = CRACK_BUFFERS.getBuffer(CRACK_TYPE);
         for (Target target : targets) {
             float health = Mth.clamp(target.health(), 0.0F, 1.0F);
             if (health >= 0.9999F) {
@@ -188,11 +198,10 @@ public final class HullDamageRenderer {
             }
             int stage = Mth.clamp((int) Math.ceil((1.0F - health) * 9.0F), 1, 9);
             drawCrackCube(vertices, matrix, target.pos(), toWorld, cameraPos, crackSprite(stage));
-            any = true;
         }
-        if (any) {
-            buffers.endBatch(CRACK_TYPE);
-        }
+        // 必须无条件 endBatch（空批次会被 discard）：复用的 builder 若留在 begun 状态，
+        // 下一帧 getBuffer 会继续往里累积，顶点坐标跨帧错乱。
+        CRACK_BUFFERS.endBatch(CRACK_TYPE);
     }
 
     private static TextureAtlasSprite crackSprite(int stage) {
@@ -283,8 +292,7 @@ public final class HullDamageRenderer {
      */
     private static void drawBars(Minecraft mc, Camera camera, Matrix4f matrix, List<Target> targets,
                                  Vec3 cameraPos) {
-        MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
-        VertexConsumer vertices = buffers.getBuffer(BarRenderType.TYPE);
+        VertexConsumer vertices = BAR_BUFFERS.getBuffer(BarRenderType.TYPE);
         Vec3 right = new Vec3(camera.getLeftVector()).scale(-1.0D);
         Vec3 up = new Vec3(camera.getUpVector());
         for (Target target : targets) {
@@ -351,7 +359,7 @@ public final class HullDamageRenderer {
                         right, up, fillWidth, slotHeight * 0.6D, red, green, blue, 1.0F);
             }
         }
-        buffers.endBatch(BarRenderType.TYPE);
+        BAR_BUFFERS.endBatch(BarRenderType.TYPE);
     }
 
     /** 相机坐标系里的一个实心四边形（公告牌），顶点在世界坐标给出。 */

@@ -147,9 +147,15 @@ public final class UnderwaterEffects {
 
     private static final float BACKDROP_RADIUS = 16.0F;
 
+    /** 复用的背景 builder（Tesselator 模式：每帧 begin/end；direct 内存不再等 GC）。 */
+    private static final BufferBuilder BACKDROP_BUILDER = new BufferBuilder(1024);
+
     private static void drawOceanBackdrop(RenderLevelStageEvent event, float r, float g, float b) {
         float v = BACKDROP_RADIUS;
-        BufferBuilder builder = new BufferBuilder(256);
+        if (BACKDROP_BUILDER.building()) {
+            BACKDROP_BUILDER.discard();
+        }
+        BufferBuilder builder = BACKDROP_BUILDER;
         builder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
         // 六面立方体，相机在中心；不剔除、不测深度，并集覆盖整个屏幕。
         // 顶点颜色按世界 Y 做一个上下渐变：上方亮一点、下方暗一点，避免整片死蓝色。

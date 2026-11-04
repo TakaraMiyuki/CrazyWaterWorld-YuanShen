@@ -369,8 +369,8 @@ public final class ShipWaterRenderer {
         float[] boxes = smoothWater(data, dt);
         float seconds = (float) waveSeconds;
 
-        // 原有的 1Hz 运行日志保持不变（不是新的详细诊断）。
-        if (level.getGameTime() - lastDebugTick >= 20L) {
+        // 运行日志降到 5 秒一条（原 1Hz）：长会话刷屏，日志体积和字符串分配都不划算。
+        if (level.getGameTime() - lastDebugTick >= 100L) {
             lastDebugTick = level.getGameTime();
             BarotraumaMod.LOGGER.info("[water] 画水面：ship={} physical={} boxes={} breaches={} delta=({},{},{}) firstSurface={}",
                     data.shipId(), data.physical(), data.boxes().length / 7, data.breaches().length / 8,
@@ -519,6 +519,19 @@ public final class ShipWaterRenderer {
      * 展开后等价于 {@code R*(v − anchor) + renderPos − camera}：绕装配锚点旋转、平移到当前
      * render 位置、再减相机。没有把 shipToWorld 再乘进 PoseStack，所以不会双重旋转。</p>
      */
+    /**
+     * 复用的水体/诊断 builder（同 vanilla {@code renderBuffers()} 的用法：每帧
+     * getBuffer→endBatch）。之前每帧 {@code new BufferBuilder} 的 direct 内存要等 GC
+     * 才释放，长时间游玩必然 native OOM（实测 8 分钟 {@code Failed to allocate ... bytes}）。
+     */
+    private static final BufferBuilder WATER_BUILDER = new BufferBuilder(4096);
+    private static final MultiBufferSource.BufferSource WATER_BUFFERS =
+            MultiBufferSource.immediate(WATER_BUILDER);
+    private static final BufferBuilder DIAG_BUILDER = new BufferBuilder(256);
+    private static final MultiBufferSource.BufferSource DIAG_BUFFERS =
+            MultiBufferSource.immediate(DIAG_BUILDER);
+    private static final BufferBuilder RAW_QUAD_BUILDER = new BufferBuilder(256);
+
     private static WaterStats drawWaterFixed(RenderLevelStageEvent event, ClientLevel level,
                                              ShipWaterStatePacket data, float[] boxes,
                                              float seconds, float dx, float dy, float dz,
@@ -542,10 +555,13 @@ public final class ShipWaterRenderer {
         Matrix4f m = pose.last().pose();
         // 独立 buffer：不要和声纳/其它 debugQuads 共用 mc.renderBuffers().bufferSource()，
         // 否则 endBatch(debugQuads) 可能把别人的 pending 顶点一起画掉。
-        BufferBuilder waterBuilder = new BufferBuilder(4096);
-        MultiBufferSource.BufferSource buffers = MultiBufferSource.immediate(waterBuilder);
+        // builder 本身跨帧复用（见 WATER_BUILDER 注释）；万一上一帧异常把 builder 留在
+        // begun 状态，这里先复位，避免 "Already building" 连环炸。
+        if (WATER_BUILDER.building()) {
+            WATER_BUILDER.discard();
+        }
         RenderType type = WaterRenderType.TYPE;
-        VertexConsumer vc = buffers.getBuffer(type);
+        VertexConsumer vc = WATER_BUFFERS.getBuffer(type);
         float r = 0.05F;
         float g = 0.28F;
         float b = 0.42F;
@@ -705,7 +721,7 @@ public final class ShipWaterRenderer {
             modelView.scale(0.99975586F, 0.99975586F, 0.99975586F);
             RenderSystem.applyModelViewMatrix();
             try {
-                buffers.endBatch(type);
+                WATER_BUFFERS.endBatch(type);
             } finally {
                 modelView.popPose();
                 RenderSystem.applyModelViewMatrix();
@@ -983,9 +999,7 @@ public final class ShipWaterRenderer {
 
         // 三个位置的"现有管线"标记用一个独立 buffer，避免碰主水路径的 buffer。
         Matrix4f pose = event.getPoseStack().last().pose();
-        BufferBuilder productionBuilder = new BufferBuilder(256);
-        MultiBufferSource.BufferSource production = MultiBufferSource.immediate(productionBuilder);
-        VertexConsumer productionVc = production.getBuffer(RenderType.debugFilledBox());
+        VertexConsumer productionVc = DIAG_BUFFERS.getBuffer(RenderType.debugFilledBox());
         int productionQuads = 0;
         for (int i = 0; i < centers.length; i++) {
             Vec3[] quad = markerQuad(centers[i], right, up, 0.10D);
@@ -1003,7 +1017,7 @@ public final class ShipWaterRenderer {
         productionModelView.setIdentity();
         RenderSystem.applyModelViewMatrix();
         try {
-            production.endBatch(RenderType.debugFilledBox());
+            DIAG_BUFFERS.endBatch(RenderType.debugFilledBox());
         } finally {
             productionModelView.popPose();
             RenderSystem.applyModelViewMatrix();
@@ -1055,7 +1069,10 @@ public final class ShipWaterRenderer {
                                     float r, float g, float b, float a,
                                     boolean depthTest, boolean depthWrite) {
         Matrix4f pose = event.getPoseStack().last().pose();
-        BufferBuilder builder = new BufferBuilder(256);
+        if (RAW_QUAD_BUILDER.building()) {
+            RAW_QUAD_BUILDER.discard();
+        }
+        BufferBuilder builder = RAW_QUAD_BUILDER;
         builder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
         for (Vec3 v : worldQuad) {
             Vec3 rel = v.subtract(cameraPos);
