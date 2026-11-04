@@ -111,7 +111,10 @@ public final class ModShipBlocks {
         return block == HULL_GLASS.get()
                 || block == TEST_HULL.get()
                 || block == SONAR.get()
-                || block == ModBlocks.SUBMARINE_PLATING.get();
+                || block == ModBlocks.SUBMARINE_PLATING.get()
+                // 排水泵是船上设备：必须被扫描当作船体方块收进刚体，否则装船后泵会
+                // 留在世界原地不跟船走（用户实测"水泵不会受到物理效果影响"）。
+                || block == ModBlocks.DRAIN_PUMP.get();
     }
 
     /**

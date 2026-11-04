@@ -40,6 +40,12 @@ public class PumpScreen extends AbstractContainerScreen<PumpMenu> {
     }
 
     @Override
+    protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
+        // 标题用菜单的本地化名字，避免和原版标题叠成中英文双重影（和任务终端同一个问题）。
+        graphics.drawString(font, title, 10, 7, ACCENT, false);
+    }
+
+    @Override
     protected void renderBg(GuiGraphics graphics, float partialTick, int mouseX, int mouseY) {
         int x = leftPos;
         int y = topPos;
@@ -52,7 +58,6 @@ public class PumpScreen extends AbstractContainerScreen<PumpMenu> {
         boolean enabled = menu.data().get(PumpMenu.DATA_ENABLED) != 0;
         int rate = menu.data().get(PumpMenu.DATA_RATE);
 
-        graphics.drawString(font, "排水泵", x + 10, y + 7, ACCENT, false);
         graphics.drawString(font, enabled ? "运行中" : "已关闭", x + W - 60, y + 7,
                 enabled ? GREEN : DIM, false);
 
