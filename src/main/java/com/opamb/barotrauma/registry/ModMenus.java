@@ -26,6 +26,10 @@ public final class ModMenus {
             MENUS.register("mission_terminal", () -> IForgeMenuType.create(
                     (id, inv, buf) -> new com.opamb.barotrauma.menu.MissionMenu(id, buf.readBlockPos())));
 
+    public static final RegistryObject<MenuType<com.opamb.barotrauma.menu.PumpMenu>> PUMP =
+            MENUS.register("drain_pump", () -> IForgeMenuType.create(
+                    (id, inv, buf) -> new com.opamb.barotrauma.menu.PumpMenu(id, inv, buf)));
+
     private ModMenus() {
     }
 

@@ -119,6 +119,9 @@ public final class StarterSub {
         // 声纳台就是船脑（机器/舱门已按用户要求全部删除，船上只留船壳和声纳）
         level.setBlock(new BlockPos(ORIGIN_X + 5, ORIGIN_Y + 1, ORIGIN_Z + 4),
                 ModShipBlocks.SONAR.get().defaultBlockState(), 2);
+        // 排水泵：摆在声纳旁边，右键可设开关/排水量
+        level.setBlock(new BlockPos(ORIGIN_X + 4, ORIGIN_Y + 1, ORIGIN_Z + 4),
+                com.opamb.barotrauma.registry.ModBlocks.DRAIN_PUMP.get().defaultBlockState(), 2);
 
         // 声纳台就是船脑（在上面的机器布局里已经放下去了），这里直接拿它的方块实体扫一次
         if (level.getBlockEntity(corePos) instanceof ShipCoreBlockEntity core) {

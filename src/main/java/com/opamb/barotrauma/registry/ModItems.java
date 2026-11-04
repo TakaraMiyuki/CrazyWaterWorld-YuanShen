@@ -44,6 +44,9 @@ public final class ModItems {
     public static final RegistryObject<Item> SONAR = blockItem("sonar", ModShipBlocks.SONAR);
     public static final RegistryObject<Item> STATION_PLATING = blockItem("station_plating", ModShipBlocks.STATION_PLATING);
 
+    /** 排水泵方块物品。 */
+    public static final RegistryObject<Item> DRAIN_PUMP = blockItem("drain_pump", ModBlocks.DRAIN_PUMP);
+
     // ---- 任务/经济 ----
     public static final RegistryObject<Item> MISSION_TERMINAL =
             blockItem("mission_terminal", ModBlocks.MISSION_TERMINAL);

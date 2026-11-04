@@ -62,6 +62,9 @@ public final class ShipSimulation {
     private double ballast;
     private double ballastCapacity;
     private boolean pumpOut = true;
+    /** 独立排水泵（排水泵方块控制）：开关 + 速率（单位/秒，1 格 = 100 单位）。 */
+    private boolean drainPumpEnabled;
+    private double drainPumpRate = 600.0D;
     /**
      * 破口格数。洞越大进水越快——潜渊症按 Gap 的开口面积算，
      * 我们先按"被砸掉的船体格数"线性放大，至少 1 格。
@@ -139,6 +142,8 @@ public final class ShipSimulation {
         this.ballast = old.ballast;
         this.ballastCapacity = old.ballastCapacity;
         this.pumpOut = old.pumpOut;
+        this.drainPumpEnabled = old.drainPumpEnabled;
+        this.drainPumpRate = old.drainPumpRate;
         this.airlockPhase = old.airlockPhase;
         this.airlockWater = old.airlockWater;
         this.airlockCycles = old.airlockCycles;
@@ -254,6 +259,23 @@ public final class ShipSimulation {
             ballast += Math.max(0.0D, add);
         }
 
+        // 排水泵方块：独立电动泵，不吃反应堆供电（MVP：五台机器已删）。
+        // 先抽密闭舱室，再抽连海空腔（破口舱室）——后者同时还在被 tickSeaFlood 灌水，
+        // 抽排速度和进水速度形成平衡：泵只能延缓沉没，堵不上洞就救不了船。
+        if (drainPumpEnabled && drainPumpRate > 0.0D) {
+            double drain = drainPumpRate * dt;
+            for (int i = 0; i < water.length && drain > 0.0D; i++) {
+                double take = Math.min(water[i], drain);
+                water[i] -= take;
+                drain -= take;
+            }
+            for (int i = 0; i < pocketWater.length && drain > 0.0D; i++) {
+                double take = Math.min(pocketWater[i], drain);
+                pocketWater[i] -= take;
+                drain -= take;
+            }
+        }
+
         // 气闸：抽干 / 注水，完成后自动回到 CLOSED（此时另一侧门才允许开）
         if (airlockPhase == AirlockPhase.DRAINING) {
             airlockWater = Math.max(0.0D, airlockWater - AIRLOCK_RATE * ratio * dt);
@@ -315,6 +337,24 @@ public final class ShipSimulation {
 
     public void setPumpOut(boolean pumpOut) {
         this.pumpOut = pumpOut;
+    }
+
+    /** 排水泵设置：速率夹紧到 100..3000 单位/秒（1~30 格³/秒）。 */
+    public void setDrainPump(boolean enabled, double rate) {
+        this.drainPumpEnabled = enabled;
+        this.drainPumpRate = Math.max(100.0D, Math.min(3000.0D, rate));
+    }
+
+    public ShipGeometry.Result geometry() {
+        return geometry;
+    }
+
+    public boolean drainPumpEnabled() {
+        return drainPumpEnabled;
+    }
+
+    public double drainPumpRate() {
+        return drainPumpRate;
     }
 
     /** 设置裂变率 / 涡轮输出（0..1）。 */

@@ -1,6 +1,7 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
+import com.opamb.barotrauma.block.DrainPumpBlock;
 import com.opamb.barotrauma.block.HullBlock;
 import com.opamb.barotrauma.block.MissionTerminalBlock;
 import net.minecraft.world.level.block.Block;
@@ -38,6 +39,13 @@ public final class ModBlocks {
             () -> new MissionTerminalBlock(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.COLOR_CYAN)
                     .strength(15.0F, 1200.0F)
+                    .sound(SoundType.METAL)));
+
+    /** 排水泵：把船内模拟水往外抽；右键菜单设开关与排水量。 */
+    public static final RegistryObject<Block> DRAIN_PUMP = BLOCKS.register("drain_pump",
+            () -> new DrainPumpBlock(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.METAL)
+                    .strength(10.0F, 600.0F)
                     .sound(SoundType.METAL)));
 
     /** 黑匣子方块：沉船船舱里那一格，打掉掉落 black_box（打捞任务的交付物）。 */

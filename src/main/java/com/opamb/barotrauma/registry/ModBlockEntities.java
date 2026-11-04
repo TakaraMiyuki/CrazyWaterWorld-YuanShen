@@ -1,6 +1,7 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
+import com.opamb.barotrauma.blockentity.DrainPumpBlockEntity;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
 import com.opamb.barotrauma.blockentity.SonarBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityType;
@@ -20,6 +21,10 @@ public final class ModBlockEntities {
     public static final RegistryObject<BlockEntityType<SonarBlockEntity>> SONAR =
             BLOCK_ENTITIES.register("sonar",
                     () -> BlockEntityType.Builder.of(SonarBlockEntity::new, ModShipBlocks.SONAR.get()).build(null));
+
+    public static final RegistryObject<BlockEntityType<DrainPumpBlockEntity>> DRAIN_PUMP =
+            BLOCK_ENTITIES.register("drain_pump", () -> BlockEntityType.Builder
+                    .of(DrainPumpBlockEntity::new, ModBlocks.DRAIN_PUMP.get()).build(null));
 
     // 船核心方块已经合并进声纳台（SonarBlockEntity extends ShipCoreBlockEntity），
     // 不再有独立的 ship_core 方块实体。

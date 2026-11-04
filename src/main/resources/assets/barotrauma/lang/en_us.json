@@ -19,5 +19,7 @@
   "item.barotrauma.mission_terminal": "Mission Terminal",
   "item.barotrauma.black_box_block": "Black Box",
   "item.barotrauma.black_box": "Black Box",
-  "item.barotrauma.supply_crate": "Supply Crate"
+  "item.barotrauma.supply_crate": "Supply Crate",
+  "block.barotrauma.drain_pump": "Drain Pump",
+  "item.barotrauma.drain_pump": "Drain Pump"
 }

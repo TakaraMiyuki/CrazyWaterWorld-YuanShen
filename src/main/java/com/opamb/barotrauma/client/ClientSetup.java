@@ -34,6 +34,8 @@ public final class ClientSetup {
                     com.opamb.barotrauma.registry.ModMenus.SONAR.get(), SonarScreen::new);
             net.minecraft.client.gui.screens.MenuScreens.register(
                     com.opamb.barotrauma.registry.ModMenus.MISSION_TERMINAL.get(), MissionScreen::new);
+            net.minecraft.client.gui.screens.MenuScreens.register(
+                    com.opamb.barotrauma.registry.ModMenus.PUMP.get(), PumpScreen::new);
         });
     }
 

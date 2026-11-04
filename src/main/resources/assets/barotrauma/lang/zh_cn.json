@@ -19,5 +19,7 @@
   "item.barotrauma.mission_terminal": "任务终端",
   "item.barotrauma.black_box_block": "黑匣子",
   "item.barotrauma.black_box": "黑匣子",
-  "item.barotrauma.supply_crate": "补给箱"
+  "item.barotrauma.supply_crate": "补给箱",
+  "block.barotrauma.drain_pump": "排水泵",
+  "item.barotrauma.drain_pump": "排水泵"
 }
