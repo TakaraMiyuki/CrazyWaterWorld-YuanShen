@@ -1560,6 +1560,27 @@ public final class VsPilot {
 
     // ------------------------------------------------------------------ 认领记录（P1 持久化）
 
+    /**
+     * 认领失败后的连贯回滚：清掉本 tick 可能已部分发布的运行时状态，再清存档记录。
+     *
+     * <p>{@link #adoptFromSave} 入口保证 {@code ship == null}；此处若非空，说明
+     * {@link #adopt} 已经发布到一半（几何重建成功、{@code sendWaterState} 等尾部
+     * 步骤抛了异常）。不回滚的话就是"运行时已接管 + 记录已清"的孤儿组合——
+     * 下次重启这艘船永远没人认领，且本进程内水面包/干燥区还挂着半套。
+     * {@link #resetForServerLifecycle()} 是纯内存清理，不碰任何世界方块。</p>
+     */
+    private static void rollbackPartialAdoption(ServerLevel level) {
+        if (ship != null) {
+            resetForServerLifecycle();
+        }
+        pendingAdoption = null;
+        try {
+            ShipSavedData.get(level).clearAssembled();
+        } catch (Throwable ignored) {
+            // 清不掉记录也不影响启动/tick；下次重启认领会再走一遍这条路径
+        }
+    }
+
     /** 装配成功：把认领记录写进世界存档；世界加载后 P1.2 按它接回物理船。 */
     private static void recordAssembled(ServerLevel level, Map<BlockPos, BlockState> captured,
                                         ShipState shipState, BlockPos core, ServerShip assembled) {
@@ -1656,16 +1677,13 @@ public final class VsPilot {
         }
         if (found != null) {
             // 认领路径抛任何异常都不许带崩启动（这里跑在 ServerStarted 的下一 tick 主线程）：
-            // 清记录降级为无物理船，宁可少一艘船，不要开不起服
+            // 回滚 + 清记录，降级为无物理船，宁可少一艘船，不要开不起服
             try {
                 adopt(level, record, found);
             } catch (Throwable error) {
-                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），清除记录", record.vsShipId, error.toString());
-                try {
-                    ShipSavedData.get(level).clearAssembled();
-                } catch (Throwable ignored) {
-                    // 清不掉记录也不影响启动
-                }
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚并清除记录",
+                        record.vsShipId, error.toString());
+                rollbackPartialAdoption(level);
             }
             pendingAdoption = null;
             return;
@@ -1693,27 +1711,26 @@ public final class VsPilot {
                     pendingAdoption.lastZ, ADOPT_POSITION_TOLERANCE);
         }
         if (found != null) {
-            // 与 adoptFromSave 相同的兜底：认领异常清记录降级，不带崩 tick 循环
+            // 与 adoptFromSave 相同的兜底：认领异常回滚 + 清记录降级，不带崩 tick 循环
             try {
                 adopt(level, pendingAdoption, found);
             } catch (Throwable error) {
-                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），清除记录",
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚并清除记录",
                         pendingAdoption.vsShipId, error.toString());
-                try {
-                    ShipSavedData.get(level).clearAssembled();
-                } catch (Throwable ignored) {
-                    // 清不掉记录也不影响 tick
-                }
+                rollbackPartialAdoption(level);
             }
             pendingAdoption = null;
             return;
         }
         if (level.getGameTime() > adoptDeadlineGameTime) {
-            // 铺方块前的终检：VS2 里其实还有这艘船的数据（只是没加载/没认领成功）就继续等。
-            // 否则刚体稍后加载成功，世界方块 + 幽灵刚体两份船，且记录已清、无人再管。
-            if (VsBridge.shipDataExists(level, pendingAdoption.vsShipId)) {
+            // 铺方块前的终检（三态）：VS2 里仍有该船数据 → 继续等；查询失败（船世界
+            // 不可用）→ 无法判定，同样继续等——此时铺方块就是赌"船不存在"，赌输即
+            // 双份船。只有成功查询确认不存在才铺。
+            Boolean exists = VsBridge.shipDataExists(level, pendingAdoption.vsShipId);
+            if (exists == null || exists) {
                 adoptDeadlineGameTime = level.getGameTime() + ADOPT_RETRY_TICKS;
-                LOGGER.warn("[vs] 超时但 VS2 里仍有该船数据，延长 {} 秒继续等待认领",
+                LOGGER.warn("[vs] 超时但 VS2 船数据{}，延长 {} 秒继续等待认领",
+                        exists == null ? "查询失败（暂无法判定）" : "仍在",
                         ADOPT_RETRY_TICKS / 20L);
                 return;
             }

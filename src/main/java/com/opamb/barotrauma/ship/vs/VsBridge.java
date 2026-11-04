@@ -4,6 +4,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3dc;
+import org.jetbrains.annotations.Nullable;
 import org.valkyrienskies.core.api.ships.LoadedServerShip;
 import org.valkyrienskies.core.api.ships.ServerShip;
 import org.valkyrienskies.core.api.ships.ShipPhysicsListener;
@@ -349,13 +350,21 @@ public final class VsBridge {
      *
      * <p>铺回快照是不可逆动作：如果 VS2 里其实还有这艘船（只是懒加载没完成或
      * 认领失败），铺了就是"世界方块 + 幽灵刚体"两份船。终检存在就继续等。</p>
+     *
+     * <p>三态返回：{@code null} = 船世界不可用或查询失败（<strong>无法判定</strong>，
+     * 调用方必须当作"可能还在"继续等待，绝不能据此铺方块）；只有成功查询确认
+     * 不存在才返回 {@code false}。</p>
      */
-    public static boolean shipDataExists(ServerLevel level, long id) {
+    @Nullable
+    public static Boolean shipDataExists(ServerLevel level, long id) {
         try {
             VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
-            return world != null && world.getAllShips().getById(id) != null;
+            if (world == null) {
+                return null;
+            }
+            return world.getAllShips().getById(id) != null;
         } catch (Throwable error) {
-            return false;
+            return null;
         }
     }
 }
