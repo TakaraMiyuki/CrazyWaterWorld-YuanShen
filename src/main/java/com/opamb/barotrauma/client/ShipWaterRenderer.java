@@ -1344,7 +1344,10 @@ public final class ShipWaterRenderer {
             }
             boolean adjacent = false;
             switch (face) {
-                case NORTH -> adjacent = Math.abs((boxes[j + 3] + 1.0F) - iMinZ) < 1.0E-3F
+                // 北侧：邻居的 maxZ 贴着我的 minZ。原来这里误写成 boxes[j+3]（maxX），
+                // 拿 X 去和 Z 比，条件几乎永远不成立 → 每根水柱的北面都被当成临空，
+                // 多画一条竖面，就是"一格一条线"的来源。
+                case NORTH -> adjacent = Math.abs((boxes[j + 5] + 1.0F) - iMinZ) < 1.0E-3F
                         && overlap(iMinX, iMaxX, boxes[j], boxes[j + 3] + 1.0F);
                 case SOUTH -> adjacent = Math.abs(boxes[j + 2] - iMaxZ) < 1.0E-3F
                         && overlap(iMinX, iMaxX, boxes[j], boxes[j + 3] + 1.0F);
