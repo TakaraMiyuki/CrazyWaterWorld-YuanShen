@@ -1,6 +1,8 @@
 {
   "replace": false,
   "values": [
-    "barotrauma:submarine_plating"
+    "barotrauma:submarine_plating",
+    "barotrauma:hatch",
+    "barotrauma:bulkhead_door"
   ]
 }

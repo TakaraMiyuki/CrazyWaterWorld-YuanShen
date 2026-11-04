@@ -217,6 +217,39 @@ public final class ShipWaterRenderer {
     }
 
     /**
+     * 这个位置是不是落在某个船舱的盒子里（不管进没进水）。
+     *
+     * <p>进水的舱室必须按"浸没"处理——哪怕船停在哨站干燥区里。</p>
+     */
+    public static boolean isInsideCompartment(Level level, Vec3 pos) {
+        if (pos == null) {
+            return false;
+        }
+        ShipWaterStatePacket data = state;
+        if (!data.physical() && OceanEnvironment.isInsideStarterSubDryZone(pos)) {
+            return true;
+        }
+        float[] boxes = data.boxes();
+        if (boxes.length < 7) {
+            return false;
+        }
+        if (data.physical() && !lastShipFound) {
+            return false;
+        }
+        double lx = pos.x - lastDeltaX;
+        double ly = pos.y - lastDeltaY;
+        double lz = pos.z - lastDeltaZ;
+        for (int i = 0; i + 6 < boxes.length; i += 7) {
+            if (lx >= boxes[i] && lx <= boxes[i + 3] + 1.0F
+                    && ly >= boxes[i + 1] && ly <= boxes[i + 4] + 1.0F
+                    && lz >= boxes[i + 2] && lz <= boxes[i + 5] + 1.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 客户端判断某个位置是否在“未进水的船舱”里。
      *
      * <p>水面包里的盒子是装配坐标，渲染位置相对锚点的位移由 onRenderStage 每帧缓存；
@@ -263,7 +296,9 @@ public final class ShipWaterRenderer {
                     || minZ > StarterSub.ORIGIN_Z + StarterSub.SIZE_Z - 1) {
                 continue;
             }
-            if (eyeY <= boxes[i + 6] + 0.01F) {
+            // 干燥盒子（水面=舱底）不算进水，别把站在舱底的人判成湿的。
+            boolean dryBox = boxes[i + 6] <= boxes[i + 1] + 0.01F;
+            if (!dryBox && eyeY <= boxes[i + 6] + 0.01F) {
                 return false;
             }
         }
@@ -285,7 +320,9 @@ public final class ShipWaterRenderer {
             if (px >= minX && px <= maxX
                     && py >= minY && py <= top
                     && pz >= minZ && pz <= maxZ
-                    && py > surface + 0.01F) {
+                    // 干燥盒子整个都算干（水面就是舱底，脚底正好等于它）；
+                    // 进过水的箱子仍然要求高于水面。
+                    && (dryBox || py > surface + 0.01F)) {
                 return true;
             }
         }

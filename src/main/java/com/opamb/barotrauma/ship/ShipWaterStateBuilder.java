@@ -51,35 +51,68 @@ public final class ShipWaterStateBuilder {
                 pocketSources.get(pocket).add(breach.pos());
             }
         }
+        // 每个水体第一个盒子的下标：门两侧过水的视觉要用"接收侧"的盒子算水面。
+        int[] bodyBox = new int[compartments.size() + pockets.size()];
         for (int i = 0; i < compartments.size(); i++) {
+            bodyBox[i] = boxes.size();
             appendCompartment(boxes, compartments.get(i), state.simulation().waterUnits(i), null);
         }
         for (int i = 0; i < pockets.size(); i++) {
+            bodyBox[compartments.size() + i] = boxes.size();
             pocketBoxIndex[i] = appendCompartment(boxes, pockets.get(i),
                     state.simulation().pocketWater(i), pocketSources.get(i));
         }
 
-        // 每个破口 8 个 float：格中心 x/y/z + boxes 里的舱室下标 + 朝舱内的水平方向
+        // 破口 8 个 float：格中心 x/y/z + boxes 里的舱室下标 + 朝舱内的水平方向
         // + 所在空腔的 minY/maxY（客户端据此判断"顶部破口"和"是否灌满"）。
-        float[] breaches = new float[state.breaches().size() * 8];
-        int breachOffset = 0;
+        List<float[]> breachRows = new ArrayList<>();
         for (ShipState.Breach breach : state.breaches()) {
             int pocket = pocketIndex(pockets, breach.pos());
             if (pocket < 0) {
                 continue;
             }
             float[] range = yRange(pockets.get(pocket));
-            breaches[breachOffset++] = breach.pos().getX() + 0.5F;
-            breaches[breachOffset++] = breach.pos().getY() + 0.5F;
-            breaches[breachOffset++] = breach.pos().getZ() + 0.5F;
-            breaches[breachOffset++] = pocketBoxIndex[pocket];
-            breaches[breachOffset++] = breach.dirX();
-            breaches[breachOffset++] = breach.dirZ();
-            breaches[breachOffset++] = range[0];
-            breaches[breachOffset++] = range[1];
+            breachRows.add(new float[]{
+                    breach.pos().getX() + 0.5F, breach.pos().getY() + 0.5F, breach.pos().getZ() + 0.5F,
+                    pocketBoxIndex[pocket], breach.dirX(), breach.dirZ(), range[0], range[1]});
         }
-        if (breachOffset != breaches.length) {
-            breaches = java.util.Arrays.copyOf(breaches, breachOffset);
+        // 开着的门：两侧有水位差时，把水花/气泡画在门格上，方向朝"接水"的那一侧。
+        for (ShipGeometry.DoorLink link : state.geometry().doorLinks()) {
+            if (!link.open() || link.body() == link.other()) {
+                continue;
+            }
+            int a = link.body();
+            int b = link.other();
+            double la = state.simulation().bodyLevel(a);
+            double lb = state.simulation().bodyLevel(b);
+            if (Math.abs(la - lb) <= 0.02D) {
+                continue;
+            }
+            int wet = la > lb ? a : b;
+            int dry = la > lb ? b : a;
+            if (dry < 0 || dry >= bodyBox.length || bodyBox[dry] < 0
+                    || bodyBox[dry] >= boxes.size()) {
+                continue;
+            }
+            float[] range = yRange(cellsOf(compartments, pockets, dry));
+            if (range == null) {
+                continue;
+            }
+            double[] wetCenter = centerOf(cellsOf(compartments, pockets, wet));
+            double dx = link.cell().getX() + 0.5D - wetCenter[0];
+            double dz = link.cell().getZ() + 0.5D - wetCenter[1];
+            double length = Math.sqrt(dx * dx + dz * dz);
+            float dirX = length > 1.0E-4D ? (float) (dx / length) : 0.0F;
+            float dirZ = length > 1.0E-4D ? (float) (dz / length) : 0.0F;
+            breachRows.add(new float[]{
+                    link.cell().getX() + 0.5F, link.cell().getY() + 0.5F, link.cell().getZ() + 0.5F,
+                    bodyBox[dry], dirX, dirZ, range[0], range[1]});
+        }
+        float[] breaches = new float[breachRows.size() * 8];
+        int breachOffset = 0;
+        for (float[] row : breachRows) {
+            System.arraycopy(row, 0, breaches, breachOffset, 8);
+            breachOffset += 8;
         }
 
         float[] flat = new float[boxes.size() * 7];
@@ -102,9 +135,14 @@ public final class ShipWaterStateBuilder {
 
     /** 舱室的 minY/maxY。 */
     private static float[] yRange(ShipGeometry.Compartment compartment) {
+        return yRange(compartment.cells());
+    }
+
+    /** 一组格子的 minY/maxY。 */
+    private static float[] yRange(java.util.Collection<BlockPos> cells) {
         int minY = Integer.MAX_VALUE;
         int maxY = Integer.MIN_VALUE;
-        for (BlockPos cell : compartment.cells()) {
+        for (BlockPos cell : cells) {
             minY = Math.min(minY, cell.getY());
             maxY = Math.max(maxY, cell.getY());
         }
@@ -112,6 +150,36 @@ public final class ShipWaterStateBuilder {
             return new float[]{0.0F, 0.0F};
         }
         return new float[]{minY, maxY};
+    }
+
+    /** 第 body 个水体的格子（0..n-1 密闭舱室，n..n+m-1 连海空腔）。 */
+    private static java.util.Collection<BlockPos> cellsOf(List<ShipGeometry.Compartment> compartments,
+                                                          List<ShipGeometry.Compartment> pockets,
+                                                          int body) {
+        if (body >= 0 && body < compartments.size()) {
+            return compartments.get(body).cells();
+        }
+        int pocket = body - compartments.size();
+        if (pocket >= 0 && pocket < pockets.size()) {
+            return pockets.get(pocket).cells();
+        }
+        return List.of();
+    }
+
+    /** 水平质心（x,z）。 */
+    private static double[] centerOf(java.util.Collection<BlockPos> cells) {
+        double x = 0.0D;
+        double z = 0.0D;
+        long count = 0L;
+        for (BlockPos cell : cells) {
+            x += cell.getX() + 0.5D;
+            z += cell.getZ() + 0.5D;
+            count++;
+        }
+        if (count == 0L) {
+            return new double[]{0.0D, 0.0D};
+        }
+        return new double[]{x / count, z / count};
     }
 
     /**

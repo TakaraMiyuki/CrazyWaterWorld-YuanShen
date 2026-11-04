@@ -1,6 +1,8 @@
 package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
+import com.opamb.barotrauma.block.BulkheadDoorBlock;
+import com.opamb.barotrauma.block.HatchBlock;
 import com.opamb.barotrauma.block.HullBlock;
 import com.opamb.barotrauma.block.SonarBlock;
 import com.opamb.barotrauma.block.SonarProxyBlock;
@@ -81,6 +83,28 @@ public final class ModShipBlocks {
                     .sound(SoundType.NETHERITE_BLOCK)
                     .requiresCorrectToolForDrops()));
 
+    /** 横向舱口：地板/天花板上的双滑板舱门，右键开合。 */
+    public static final RegistryObject<Block> HATCH = BLOCKS.register("hatch",
+            () -> new HatchBlock(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.COLOR_GRAY)
+                    .strength(8.0F, 400.0F)
+                    .sound(SoundType.METAL)
+                    .requiresCorrectToolForDrops()
+                    .noOcclusion()
+                    .isViewBlocking((state, level, pos) -> !state.getValue(HatchBlock.OPEN))
+                    .isSuffocating((state, level, pos) -> !state.getValue(HatchBlock.OPEN))));
+
+    /** 竖向舱壁门：墙上的双滑板金属门，右键开合。 */
+    public static final RegistryObject<Block> BULKHEAD_DOOR = BLOCKS.register("bulkhead_door",
+            () -> new BulkheadDoorBlock(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.COLOR_GRAY)
+                    .strength(10.0F, 600.0F)
+                    .sound(SoundType.METAL)
+                    .requiresCorrectToolForDrops()
+                    .noOcclusion()
+                    .isViewBlocking((state, level, pos) -> !state.getValue(BulkheadDoorBlock.OPEN))
+                    .isSuffocating((state, level, pos) -> !state.getValue(BulkheadDoorBlock.OPEN))));
+
     private ModShipBlocks() {
     }
 
@@ -102,7 +126,27 @@ public final class ModShipBlocks {
         if (state.getBlock() instanceof HullBlock && HullBlock.isBreached(state)) {
             return false;
         }
+        // 门/舱口永远算"水密"：门板只有 1px 厚，但按格子算隔断。开着的门不靠
+        // 洪水填充连通两侧（那样一开门水就瞬间均摊），而是由 ShipGeometry.DoorLink
+        // 按限速流量慢慢补平。
         return !state.isAir() && state.getFluidState().isEmpty();
+    }
+
+    /** 是不是门/舱口格：算舱内（能站人、算干燥区），但水不能穿过去。 */
+    public static boolean isDoorway(BlockState state) {
+        return state.getBlock() instanceof HatchBlock
+                || state.getBlock() instanceof BulkheadDoorBlock;
+    }
+
+    /** 门格当前是不是开着（只有开着的门才有两侧水流）。 */
+    public static boolean isOpenDoorway(BlockState state) {
+        if (state.getBlock() instanceof HatchBlock) {
+            return state.getValue(HatchBlock.OPEN);
+        }
+        if (state.getBlock() instanceof BulkheadDoorBlock) {
+            return state.getValue(BulkheadDoorBlock.OPEN);
+        }
+        return false;
     }
 
     /** 判定一个方块是否属于"船体结构"（用于识别船的范围）。核心不算，站体也不算。 */
@@ -114,7 +158,9 @@ public final class ModShipBlocks {
                 || block == ModBlocks.SUBMARINE_PLATING.get()
                 // 排水泵是船上设备：必须被扫描当作船体方块收进刚体，否则装船后泵会
                 // 留在世界原地不跟船走（用户实测"水泵不会受到物理效果影响"）。
-                || block == ModBlocks.DRAIN_PUMP.get();
+                || block == ModBlocks.DRAIN_PUMP.get()
+                || block == HATCH.get()
+                || block == BULKHEAD_DOOR.get();
     }
 
     /**

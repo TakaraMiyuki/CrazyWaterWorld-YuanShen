@@ -97,6 +97,11 @@ repositories {
         name = 'Modrinth'
         url = 'https://api.modrinth.com/maven'
     }
+    // GeckoLib 动画引擎（MIT）。同样不打包，客户端/服务端单独安装。
+    maven {
+        name = 'GeckoLib'
+        url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/'
+    }
 }
 
 configurations {
@@ -126,6 +131,9 @@ dependencies {
     runtimeOnly fg.deobf("maven.modrinth:valkyrien-skies:${vs2_version}")
     // VS2 的类是用 Kotlin 写的，但 jar 里没有 kotlin-stdlib，必须另外装 Kotlin for Forge。
     runtimeOnly fg.deobf("maven.modrinth:kotlin-for-forge:${kff_version}")
+
+    // 舱门/舱口的滑板动画。GeckoLib 是独立 mod，不打进本模组 jar。
+    implementation fg.deobf("software.bernie.geckolib:geckolib-forge-1.20.1:${geckolib_version}")
 
     // ---- 测试（按 minecraft-testing 技能的三层策略，见 PLAN.md §10.37）----
     // L1：纯逻辑单测。ShipPhysics / ShipGeometry / ShipSimulation 都是不依赖 Level 的
