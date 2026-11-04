@@ -346,23 +346,43 @@ public final class VsBridge {
     }
 
     /**
-     * 刚体数据是否还存在（含未加载的数据船）——超时兜底铺方块前的终检。
+     * 终检三态：这条认领记录对应的船是否"确认彻底不存在"——超时兜底铺方块前调用。
      *
-     * <p>铺回快照是不可逆动作：如果 VS2 里其实还有这艘船（只是懒加载没完成或
-     * 认领失败），铺了就是"世界方块 + 幽灵刚体"两份船。终检存在就继续等。</p>
+     * <p>铺回快照是不可逆动作：如果 VS2 里其实还有这艘船，铺了就是
+     * "世界方块 + 幽灵刚体"两份船。所以只有<strong>双条件都确认</strong>才返回
+     * {@code true}：</p>
+     * <ul>
+     *   <li>按存档 id 查（含未加载数据船）不存在；</li>
+     *   <li>全量船里没有任何一艘停在最后已知位置附近——VS2 若以别的 id 恢复了
+     *       这艘船（存档修复/版本迁移），按 id 查会漏，位置兜底。</li>
+     * </ul>
      *
-     * <p>三态返回：{@code null} = 船世界不可用或查询失败（<strong>无法判定</strong>，
-     * 调用方必须当作"可能还在"继续等待，绝不能据此铺方块）；只有成功查询确认
-     * 不存在才返回 {@code false}。</p>
+     * <p>返回 {@code false} = 疑似仍在（继续等待）；{@code null} = 查询不可用
+     * （<strong>无法判定</strong>，同样继续等待——铺错不可逆，拒绝铺可逆）。</p>
      */
     @Nullable
-    public static Boolean shipDataExists(ServerLevel level, long id) {
+    public static Boolean shipDefinitelyGone(ServerLevel level, long id,
+                                             double lastX, double lastY, double lastZ,
+                                             double positionTolerance) {
         try {
             VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
             if (world == null) {
                 return null;
             }
-            return world.getAllShips().getById(id) != null;
+            if (world.getAllShips().getById(id) != null) {
+                return false;
+            }
+            double radiusSq = positionTolerance * positionTolerance;
+            for (ServerShip candidate : world.getAllShips()) {
+                Vector3dc p = candidate.getTransform().getPositionInWorld();
+                double dx = p.x() - lastX;
+                double dy = p.y() - lastY;
+                double dz = p.z() - lastZ;
+                if (dx * dx + dy * dy + dz * dz < radiusSq) {
+                    return false;
+                }
+            }
+            return true;
         } catch (Throwable error) {
             return null;
         }

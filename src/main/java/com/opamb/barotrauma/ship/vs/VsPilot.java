@@ -1561,24 +1561,22 @@ public final class VsPilot {
     // ------------------------------------------------------------------ 认领记录（P1 持久化）
 
     /**
-     * 认领失败后的连贯回滚：清掉本 tick 可能已部分发布的运行时状态，再清存档记录。
+     * 认领失败后的连贯回滚：清掉本 tick 可能已部分发布的运行时状态，<strong>保留存档记录</strong>。
      *
      * <p>{@link #adoptFromSave} 入口保证 {@code ship == null}；此处若非空，说明
      * {@link #adopt} 已经发布到一半（几何重建成功、{@code sendWaterState} 等尾部
-     * 步骤抛了异常）。不回滚的话就是"运行时已接管 + 记录已清"的孤儿组合——
-     * 下次重启这艘船永远没人认领，且本进程内水面包/干燥区还挂着半套。
+     * 步骤抛了异常）。不回滚的话就是"运行时已接管"的半套状态。
      * {@link #resetForServerLifecycle()} 是纯内存清理，不碰任何世界方块。</p>
+     *
+     * <p>记录必须保留：VS2 船还在（回滚不删刚体），清了记录它就是永久孤儿。
+     * 保留的代价是确定性损坏时每次重启都会重试失败一次——可观测、可人工修复
+     * （修数据或 {@code /vs delete}），且绝不产生双份船。</p>
      */
-    private static void rollbackPartialAdoption(ServerLevel level) {
+    private static void rollbackPartialAdoption() {
         if (ship != null) {
             resetForServerLifecycle();
         }
         pendingAdoption = null;
-        try {
-            ShipSavedData.get(level).clearAssembled();
-        } catch (Throwable ignored) {
-            // 清不掉记录也不影响启动/tick；下次重启认领会再走一遍这条路径
-        }
     }
 
     /** 装配成功：把认领记录写进世界存档；世界加载后 P1.2 按它接回物理船。 */
@@ -1614,10 +1612,12 @@ public final class VsPilot {
             if (proxyPos != null) {
                 record.proxyPos = proxyPos;
             }
-            // 位置回退匹配用的"最后已知位置"：跟刚体当前位置走。
-            // 不能写 record.x/y/z——那是快照坐标空间的装配锚点，动它会破坏破口的世界→快照映射。
+            // 位置回退匹配用的"最后已知位置"：只认"已加载"的刚体句柄。
+            // view() 的回退句柄（未加载数据船）读到的是陈旧 transform，会把 lastX/Y/Z
+            // 写回旧位置；也不能写 record.x/y/z——那是快照坐标空间的装配锚点，动它会
+            // 破坏破口的世界→快照映射。
             try {
-                ServerShip live = view(level);
+                LoadedServerShip live = VsBridge.loaded(level, ship);
                 if (live != null) {
                     Vec3 now = VsBridge.position(live);
                     record.lastX = now.x;
@@ -1681,9 +1681,9 @@ public final class VsPilot {
             try {
                 adopt(level, record, found);
             } catch (Throwable error) {
-                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚并清除记录",
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚运行时状态（记录保留，下次重启重试）",
                         record.vsShipId, error.toString());
-                rollbackPartialAdoption(level);
+                rollbackPartialAdoption();
             }
             pendingAdoption = null;
             return;
@@ -1715,26 +1715,29 @@ public final class VsPilot {
             try {
                 adopt(level, pendingAdoption, found);
             } catch (Throwable error) {
-                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚并清除记录",
+                LOGGER.warn("[vs] 认领物理船 {} 异常（{}），回滚运行时状态（记录保留，下次重启重试）",
                         pendingAdoption.vsShipId, error.toString());
-                rollbackPartialAdoption(level);
+                rollbackPartialAdoption();
             }
             pendingAdoption = null;
             return;
         }
         if (level.getGameTime() > adoptDeadlineGameTime) {
-            // 铺方块前的终检（三态）：VS2 里仍有该船数据 → 继续等；查询失败（船世界
-            // 不可用）→ 无法判定，同样继续等——此时铺方块就是赌"船不存在"，赌输即
-            // 双份船。只有成功查询确认不存在才铺。
-            Boolean exists = VsBridge.shipDataExists(level, pendingAdoption.vsShipId);
-            if (exists == null || exists) {
+            // 铺方块前的终检（三态）：按 id 和按最后已知位置（全量船，含不同 id 的
+            // 恢复结果）都确认不存在，才允许铺——查询失败或疑似仍在都继续等。
+            // 铺错（双份船）不可逆，拒绝铺（继续等）可逆。
+            Boolean gone = VsBridge.shipDefinitelyGone(level, pendingAdoption.vsShipId,
+                    pendingAdoption.lastX, pendingAdoption.lastY, pendingAdoption.lastZ,
+                    ADOPT_POSITION_TOLERANCE);
+            if (gone == null || !gone) {
                 adoptDeadlineGameTime = level.getGameTime() + ADOPT_RETRY_TICKS;
                 LOGGER.warn("[vs] 超时但 VS2 船数据{}，延长 {} 秒继续等待认领",
-                        exists == null ? "查询失败（暂无法判定）" : "仍在",
+                        gone == null ? "查询失败（暂无法判定）" : "仍有疑似存在的船",
                         ADOPT_RETRY_TICKS / 20L);
                 return;
             }
-            LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体，按丢失处理", ADOPT_RETRY_TICKS / 20L);
+            LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体且确认已不存在，按丢失处理",
+                    ADOPT_RETRY_TICKS / 20L);
             restoreRecordBlocks(level, pendingAdoption);
             try {
                 ShipSavedData.get(level).clearAssembled();
