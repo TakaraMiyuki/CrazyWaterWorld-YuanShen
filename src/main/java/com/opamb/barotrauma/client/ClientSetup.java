@@ -32,6 +32,8 @@ public final class ClientSetup {
             ItemBlockRenderTypes.setRenderLayer(ModShipBlocks.TEST_HULL.get(), RenderType.translucent());
             net.minecraft.client.gui.screens.MenuScreens.register(
                     com.opamb.barotrauma.registry.ModMenus.SONAR.get(), SonarScreen::new);
+            net.minecraft.client.gui.screens.MenuScreens.register(
+                    com.opamb.barotrauma.registry.ModMenus.MISSION_TERMINAL.get(), MissionScreen::new);
         });
     }
 

@@ -4,8 +4,10 @@ import com.opamb.barotrauma.BarotraumaMod;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
 import com.opamb.barotrauma.ship.ShipCores;
 import com.opamb.barotrauma.ship.ShipState;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;
@@ -37,6 +39,10 @@ public record ShipActionPacket(BlockPos corePos, int action, int a, int b, int c
     public static final int SET_AUTOPILOT_TARGET = 12;
     /** 清除目标点。 */
     public static final int CLEAR_AUTOPILOT_TARGET = 13;
+    /** 把附近的方块船收进 VS2 物理刚体（声纳屏"下潜"按钮；等价于 /barotrauma ship vs launch）。 */
+    public static final int LAUNCH = 14;
+    /** 把物理船按装配快照铺回世界（声纳屏"靠泊"按钮；等价于 /barotrauma ship vs dock）。 */
+    public static final int DOCK = 15;
 
     public ShipActionPacket(BlockPos corePos, int action) {
         this(corePos, action, 0, 0, 0);
@@ -67,6 +73,16 @@ public record ShipActionPacket(BlockPos corePos, int action, int a, int b, int c
                 return;
             }
             ServerLevel level = player.serverLevel();
+            if (action == LAUNCH) {
+                handleLaunch(player, level);
+                context.setPacketHandled(true);
+                return;
+            }
+            if (action == DOCK) {
+                handleDock(player, level);
+                context.setPacketHandled(true);
+                return;
+            }
             // 船在开动时核心坐标一直在变，提示坐标失效就退回"离玩家最近的核心"
             ShipCoreBlockEntity core = ShipCores.resolve(level, corePos, player.blockPosition());
             ShipState ship;
@@ -123,5 +139,41 @@ public record ShipActionPacket(BlockPos corePos, int action, int a, int b, int c
 
     private static int clampAxis(int value) {
         return Math.max(-1, Math.min(1, value));
+    }
+
+    /**
+     * 声纳屏"下潜"：玩家 16 格内必须有船核心（和命令入口同一套校验与提示）。
+     * 服务端权威：距离、是否已有物理船都在这里判定，客户端按钮只发请求。
+     */
+    private static void handleLaunch(ServerPlayer player, ServerLevel level) {
+        if (!com.opamb.barotrauma.ship.vs.VsSupport.available()) {
+            player.sendSystemMessage(Component.literal(
+                    "没装瓦尔基里天空 2（valkyrienskies），物理船不可用")
+                    .withStyle(ChatFormatting.RED));
+            return;
+        }
+        if (com.opamb.barotrauma.ship.vs.VsPilot.hasShip()) {
+            player.sendSystemMessage(Component.literal("已经有一艘物理船了，先靠泊再启动下一艘")
+                    .withStyle(ChatFormatting.RED));
+            return;
+        }
+        ShipCoreBlockEntity core = ShipCores.nearestCore(level, player.blockPosition(), 16.0D);
+        if (core == null) {
+            player.sendSystemMessage(Component.literal("附近 16 格内没有船核心，到船的声纳台旁边再试")
+                    .withStyle(ChatFormatting.RED));
+            return;
+        }
+        ShipState state = core.state() != null ? core.state() : core.rescan(level);
+        java.util.Set<BlockPos> blocks = state.collectBlocks(level);
+        player.sendSystemMessage(Component.literal(
+                        com.opamb.barotrauma.ship.vs.VsPilot.launch(level, blocks, state, core.getBlockPos()))
+                .withStyle(ChatFormatting.AQUA));
+    }
+
+    /** 声纳屏"靠泊"：物理船按装配快照铺回世界；没船/不同维度由 {@code VsPilot.dock} 回报原因。 */
+    private static void handleDock(ServerPlayer player, ServerLevel level) {
+        String message = com.opamb.barotrauma.ship.vs.VsPilot.dock(level);
+        player.sendSystemMessage(Component.literal(message)
+                .withStyle(ChatFormatting.AQUA));
     }
 }

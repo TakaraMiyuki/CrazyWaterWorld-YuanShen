@@ -2,11 +2,13 @@ package com.opamb.barotrauma.ship.vs;
 
 import com.opamb.barotrauma.block.HullBlock;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
+import com.opamb.barotrauma.data.ShipSavedData;
 import com.opamb.barotrauma.network.ModNetwork;
 import com.opamb.barotrauma.network.ShipHullDamagePacket;
 import com.opamb.barotrauma.network.ShipWaterStatePacket;
 import com.opamb.barotrauma.registry.ModShipBlocks;
 import com.opamb.barotrauma.ship.ShipGeometry;
+import com.opamb.barotrauma.ship.MachineCount;
 import com.opamb.barotrauma.ship.ShipSimulation;
 import com.opamb.barotrauma.ship.ShipState;
 import com.opamb.barotrauma.world.OceanEnvironment;
@@ -468,6 +470,21 @@ public final class VsPilot {
             }
             if (state != null) {
                 state.physics().sync(vel.x, vel.y, vel.z);
+            }
+            // P3 环境威胁：超耐压深度持续压伤船壳（走 HullDamage → 漏水链路）
+            if (state != null && now != null
+                    && com.opamb.barotrauma.ship.ShipPressure.tick(level, state, -now.y)) {
+                sendHullDamageState(state);
+                syncAssembledRecord(level);
+            }
+            // P3 碰撞：高速时对刚体 AABB 内固体方块抽样，命中即扣耐久（温和值）
+            if (state != null && vel != null && level.getGameTime() % 10L == 0L
+                    && Math.abs(vel.y) + Math.hypot(vel.x, vel.z) > 4.0D) {
+                collideDamage(level, now);
+            }
+            // 持久化：每 5 秒把快照/耐久的变化同步进认领记录（世界重开后靠它接船）。
+            if (level.getGameTime() % 100L == 0L) {
+                syncAssembledRecord(level);
             }
         }
     }
@@ -1393,6 +1410,7 @@ public final class VsPilot {
             VsState.activate(core, shipState, VsPilot::isPhysicalHere, VsPilot::applyControl);
             applyControl(shipState);
             sendWaterState(shipState);
+            recordAssembled(level, captured, shipState, core, assembled);
             Vec3 pendingPos = VsBridge.position(assembled);
             return String.format(Locale.ROOT,
                     "已收成物理船：%d 格，质量 %.0f/%.0f，中心 (%.1f, %.1f, %.1f)；VS2 尚未加载，推进器下一 tick 补挂",
@@ -1405,6 +1423,7 @@ public final class VsPilot {
         VsState.activate(core, shipState, VsPilot::isPhysicalHere, VsPilot::applyControl);
         applyControl(shipState);
         sendWaterState(shipState);
+        recordAssembled(level, captured, shipState, core, assembled);
         Vec3 pos = VsBridge.position(assembled);
         return String.format(Locale.ROOT,
                 "已收成物理船：%d 格，质量 %.0f/%.0f，中心 (%.1f, %.1f, %.1f)，%s｜方块级移动/水位已停用，只用刚体",
@@ -1492,7 +1511,24 @@ public final class VsPilot {
         // 4) 新的声纳台重新扫描
         BlockPos newCore = oldCore == null ? null : oldCore.offset(dx, dy, dz);
         if (newCore != null && level.getBlockEntity(newCore) instanceof ShipCoreBlockEntity core) {
-            core.rescan(level);
+            ShipState next = core.rescan(level);
+            // 飞行期间积累的耐久记录在装配状态里（快照坐标 + 位移 = 世界坐标）。
+            // 覆盖重扫结果：重扫只能从 blockstate 恢复 0%，恢复不了 10%~90% 的
+            // 部分损伤和加固倍率，直接铺回会"拆一次船、修好的船壳又漏了"。
+            if (state != null) {
+                next.hullDamage().retain(pos -> false);
+                for (Map.Entry<BlockPos, Float> entry : state.hullDamage().sortedEntries()) {
+                    next.hullDamage().setHealth(entry.getKey().offset(dx, dy, dz), entry.getValue());
+                }
+                next.setHullHealthMultiplier(state.hullHealthMultiplier());
+                core.setChanged();
+            }
+        }
+        // 认领记录作废：船已回到方块形态，耐久随核心 NBT 走。
+        try {
+            ShipSavedData.get(level).clearAssembled();
+        } catch (Throwable ignored) {
+            // 存档取不到也不能挡拆船
         }
         ship = null;
         thruster = null;
@@ -1520,6 +1556,293 @@ public final class VsPilot {
         return skipped == 0
                 ? "已拆回世界：铺回 " + placed + " 格（船位移 " + where + "）"
                 : "已拆回世界：铺回 " + placed + " 格，" + skipped + " 格被占用没放下（船位移 " + where + "）";
+    }
+
+    // ------------------------------------------------------------------ 认领记录（P1 持久化）
+
+    /** 装配成功：把认领记录写进世界存档；世界加载后 P1.2 按它接回物理船。 */
+    private static void recordAssembled(ServerLevel level, Map<BlockPos, BlockState> captured,
+                                        ShipState shipState, BlockPos core, ServerShip assembled) {
+        try {
+            Vec3 pos = VsBridge.position(assembled);
+            ShipSavedData.get(level).setAssembled(ShipSavedData.AssembledShip.of(
+                    assembled.getId(), core, proxyPos, pos, captured, shipState));
+        } catch (Throwable error) {
+            LOGGER.warn("[vs] 写装配认领记录失败：{}", error.toString());
+        }
+    }
+
+    /** 每 5 秒把快照/耐久的变化（砸掉的格、修回来的格、扣的耐久）同步进认领记录。 */
+    public static void syncAssembledRecord(ServerLevel level) {
+        if (ship == null || state == null || corePos == null) {
+            return;
+        }
+        try {
+            ShipSavedData data = ShipSavedData.get(level);
+            ShipSavedData.AssembledShip record = data.assembled();
+            if (record == null) {
+                recordAssembled(level, snapshot, state, corePos, ship);
+                return;
+            }
+            record.snapshot.clear();
+            for (Map.Entry<BlockPos, BlockState> entry : snapshot.entrySet()) {
+                record.snapshot.put(entry.getKey().asLong(), entry.getValue());
+            }
+            record.hullDamage.copyFrom(state.hullDamage());
+            record.hullMultiplier = state.hullHealthMultiplier();
+            if (proxyPos != null) {
+                record.proxyPos = proxyPos;
+            }
+            data.setDirty();
+        } catch (Throwable error) {
+            LOGGER.warn("[vs] 同步装配记录失败：{}", error.toString());
+        }
+    }
+
+    // ------------------------------------------------------------------ 世界加载认领（P1.2）
+
+    /** 待认领记录：世界加载后刚体一时找不到就挂起重试，超时把快照铺回原位。 */
+    @Nullable
+    private static ShipSavedData.AssembledShip pendingAdoption;
+    private static long adoptDeadlineGameTime = Long.MIN_VALUE;
+    /** 重试窗口：VS2 船数据是随世界懒加载的，给 30 秒。 */
+    private static final long ADOPT_RETRY_TICKS = 600L;
+    /** 按 id 找不到时按位置匹配的半径（米）。服务器停机期间船不会动。 */
+    private static final double ADOPT_POSITION_TOLERANCE = 16.0D;
+
+    /**
+     * 世界加载后按存档记录认领物理船。
+     *
+     * <p>服务端启动先 {@link #resetForServerLifecycle()} 清空静态，再调用这里：</p>
+     * <ol>
+     *   <li>按 ship id 找 VS2 刚体；找不到退到"位置最近"匹配；</li>
+     *   <li>找到 → {@link #adopt}：从记录重建快照/船状态/推进器/代理方块；</li>
+     *   <li>找不到 → 挂起 {@link #pendingAdoption} 重试；超时按丢失处理，
+     *       把快照铺回装配位置并清记录，避免留下不可控的野船。</li>
+     * </ol>
+     */
+    public static void adoptFromSave(ServerLevel level) {
+        if (!VsSupport.available() || ship != null) {
+            return;
+        }
+        ShipSavedData.AssembledShip record;
+        try {
+            record = ShipSavedData.get(level).assembled();
+        } catch (Throwable error) {
+            LOGGER.warn("[vs] 读装配认领记录失败：{}", error.toString());
+            return;
+        }
+        if (record == null) {
+            return;
+        }
+        ServerShip found = VsBridge.ensureShipDataLoaded(level, record.vsShipId);
+        if (found == null) {
+            found = VsBridge.nearestShip(level, record.x, record.y, record.z,
+                    ADOPT_POSITION_TOLERANCE);
+        }
+        if (found != null) {
+            adopt(level, record, found);
+            pendingAdoption = null;
+            return;
+        }
+        if (pendingAdoption == null) {
+            pendingAdoption = record;
+            adoptDeadlineGameTime = level.getGameTime() + ADOPT_RETRY_TICKS;
+            LOGGER.warn("[vs] 有装配记录（shipId={}，快照 {} 格）但 VS2 刚体还没加载，{} 秒内重试",
+                    record.vsShipId, record.snapshot.size(), ADOPT_RETRY_TICKS / 20L);
+        }
+    }
+
+    /** 每秒重试认领；超过期限按"刚体丢失"处理：快照铺回装配位置 + 清记录。 */
+    public static void tryAdoptTick(ServerLevel level) {
+        if (pendingAdoption == null) {
+            return;
+        }
+        if (ship != null) {
+            pendingAdoption = null;
+            return;
+        }
+        ServerShip found = VsBridge.ensureShipDataLoaded(level, pendingAdoption.vsShipId);
+        if (found == null) {
+            found = VsBridge.nearestShip(level, pendingAdoption.x, pendingAdoption.y,
+                    pendingAdoption.z, ADOPT_POSITION_TOLERANCE);
+        }
+        if (found != null) {
+            adopt(level, pendingAdoption, found);
+            pendingAdoption = null;
+            return;
+        }
+        if (level.getGameTime() > adoptDeadlineGameTime) {
+            LOGGER.warn("[vs] {} 秒内没等到 VS2 刚体，按丢失处理", ADOPT_RETRY_TICKS / 20L);
+            restoreRecordBlocks(level, pendingAdoption);
+            try {
+                ShipSavedData.get(level).clearAssembled();
+            } catch (Throwable ignored) {
+                // 清不掉记录也不影响铺方块
+            }
+            pendingAdoption = null;
+        }
+    }
+
+    /**
+     * P3 碰撞伤害（退路实现，VS2 2.4.11 没有可订阅的船-地形碰撞回调）：
+     * 高速时在刚体 AABB 附近抽样 8 个整数格，命中实心方块就对最近快照格扣 5% 耐久。
+     */
+    private static void collideDamage(ServerLevel level, Vec3 shipPos) {
+        if (ship == null || state == null || snapshot.isEmpty()) {
+            return;
+        }
+        try {
+            BlockPos probe = BlockPos.containing(shipPos);
+            for (BlockPos offset : SAMPLE_OFFSETS) {
+                BlockPos at = probe.offset(offset);
+                BlockState solid = level.getBlockState(at);
+                if (!solid.isAir() && solid.isSolidRender(level, at)) {
+                    BlockPos best = null;
+                    double bestDist = Double.MAX_VALUE;
+                    for (BlockPos pos : snapshot.keySet()) {
+                        double d = pos.distSqr(probe);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = pos;
+                        }
+                    }
+                    if (best == null) {
+                        return;
+                    }
+                    BlockState block = snapshot.get(best);
+                    float max = state.hullMaxHealth(block);
+                    if (max <= 0.0F) {
+                        return;
+                    }
+                    state.hullDamage().applyDamage(best, max * 0.05F, max);
+                    level.playSound(null, at, net.minecraft.sounds.SoundEvents.NETHERITE_BLOCK_HIT,
+                            net.minecraft.sounds.SoundSource.PLAYERS, 0.8F, 0.8F);
+                    sendHullDamageState(state);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+            // 碰撞检测出错不影响物理
+        }
+    }
+
+    private static final BlockPos[] SAMPLE_OFFSETS = {
+            new BlockPos(3, 0, 0), new BlockPos(-3, 0, 0), new BlockPos(0, 2, 0),
+            new BlockPos(0, -2, 0), new BlockPos(0, 0, 3), new BlockPos(0, 0, -3),
+            new BlockPos(2, 1, 2), new BlockPos(-2, -1, -2)
+    };
+
+    /** 兜底：刚体丢了（存档损坏/外部删船），把快照按装配位置铺回世界，不让船凭空消失。 */
+    private static void restoreRecordBlocks(ServerLevel level, ShipSavedData.AssembledShip record) {
+        Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
+        for (Map.Entry<Long, BlockState> entry : record.snapshot.entrySet()) {
+            blocks.put(BlockPos.of(entry.getKey()), entry.getValue());
+        }
+        int placed = restoreBlocks(level, blocks, 0, 0, 0);
+        LOGGER.warn("[vs] 丢失的物理船已按快照铺回装配位置：{}/{} 格", placed, blocks.size());
+    }
+
+    /** 认领成功：从记录重建全部运行时状态（快照、几何、耐久、推进器、代理、干燥区）。 */
+    private static void adopt(ServerLevel level, ShipSavedData.AssembledShip record,
+                              ServerShip found) {
+        Map<BlockPos, BlockState> snap = new LinkedHashMap<>();
+        for (Map.Entry<Long, BlockState> entry : record.snapshot.entrySet()) {
+            snap.put(BlockPos.of(entry.getKey()), entry.getValue());
+        }
+        int sonar = 0;
+        for (BlockState blockState : snap.values()) {
+            if (blockState.is(ModShipBlocks.SONAR.get())) {
+                sonar++;
+            }
+        }
+        BlockPos core = record.corePos;
+        // 用快照当探针重建几何：船坞区块此时可能还没加载，绝不能读世界方块。
+        ShipGeometry.Probe probe = new ShipGeometry.Probe() {
+            @Override
+            public boolean isSolid(BlockPos pos) {
+                if (pos.equals(core)) {
+                    return false;
+                }
+                BlockState blockState = snap.get(pos);
+                return blockState != null && ModShipBlocks.isSolidForShip(blockState);
+            }
+
+            @Override
+            public boolean isWater(BlockPos pos) {
+                return false;
+            }
+        };
+        ShipGeometry.Result geometry = ShipGeometry.scanShip(core, ShipCoreBlockEntity.RADIUS,
+                snap::containsKey, probe);
+        ShipState rebuilt = new ShipState(geometry,
+                new MachineCount(0, 0, 0, 0, 0, 0, sonar));
+        rebuilt.setHullHealthMultiplier(record.hullMultiplier);
+        rebuilt.hullDamage().copyFrom(record.hullDamage);
+        // 注意键类型：snap 是 Map<BlockPos,...>，containsKey(long) 会装箱成 Long 恒为 false，
+        // 曾把重建出的耐久/几何全部清空。
+        rebuilt.hullDamage().retain(snap::containsKey);
+        List<BlockPos> breached = new ArrayList<>();
+        for (Map.Entry<BlockPos, BlockState> entry : snap.entrySet()) {
+            if (HullBlock.isBreached(entry.getValue())) {
+                rebuilt.hullDamage().setHealth(entry.getKey(), 0.0F);
+                breached.add(entry.getKey());
+            }
+        }
+        rebuilt.addBreaches(breached);
+        rebuilt.simulation().setBreachSize(Math.max(1, breached.size()));
+
+        ship = found;
+        state = rebuilt;
+        snapshot = snap;
+        initialShipBlocks = snap.size();
+        corePos = core;
+        sonarAnchor = core;
+        proxyPos = record.proxyPos;
+        assembledPos = new Vec3(record.x, record.y, record.z);
+        lastLevel = level;
+        yardOffsetX = Integer.MIN_VALUE;
+        yardOffsetY = Integer.MIN_VALUE;
+        yardOffsetZ = Integer.MIN_VALUE;
+        nextYardScanGameTime = level.getGameTime();
+        hullCheckStartGameTime = level.getGameTime() + 100L;
+        interiorCells = new ArrayList<>();
+        for (ShipGeometry.Compartment compartment : rebuilt.compartments()) {
+            interiorCells.addAll(compartment.cells());
+        }
+        for (ShipGeometry.Compartment pocket : rebuilt.geometry().openPockets()) {
+            interiorCells.addAll(pocket.cells());
+        }
+        guardCells = buildGuardCells(interiorCells);
+        interiorOffsetX = Integer.MIN_VALUE;
+        interiorOffsetY = Integer.MIN_VALUE;
+        interiorOffsetZ = Integer.MIN_VALUE;
+        waterSyncTimer = 0;
+        // VS2 可能把船恢复成静态体：和装配一样连推 20 tick 逼它回动态。
+        unstaticTicks = 20;
+
+        VsThruster control = new VsThruster();
+        VsThruster attached = null;
+        try {
+            attached = VsBridge.attach(level, found, control);
+        } catch (Throwable ignored) {
+            // 下一 tick 走 pending 分支补挂
+        }
+        if (attached == null) {
+            pendingShip = found;
+            pendingThruster = control;
+            pendingLevel = level;
+            thruster = control;
+        } else {
+            thruster = attached;
+        }
+        VsState.activate(core, rebuilt, VsPilot::isPhysicalHere, VsPilot::applyControl);
+        applyControl(rebuilt);
+        sendWaterState(rebuilt);
+        LOGGER.info("[vs] 已认领世界里的物理船：shipId={}，快照 {} 格，破口 {} 处，推进器 {}",
+                record.vsShipId, snap.size(), breached.size(), attached != null ? "已挂" : "待挂");
+        LOGGER.info("[vs] 认领观测：记录里的耐久条目={}，重建后耐久条目={}",
+                record.hullDamage.entries().size(), rebuilt.hullDamage().entries().size());
     }
 
     /**

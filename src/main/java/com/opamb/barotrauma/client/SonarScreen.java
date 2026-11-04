@@ -7,6 +7,7 @@ import com.opamb.barotrauma.network.ShipActionPacket;
 import com.opamb.barotrauma.network.SonarPingPacket;
 import com.opamb.barotrauma.sonar.ClientSonarCache;
 import com.opamb.barotrauma.sonar.SonarScan;
+import com.opamb.barotrauma.ship.vs.VsState;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
@@ -583,6 +584,18 @@ public class SonarScreen extends AbstractContainerScreen<SonarMenu> {
         graphics.fill(barX, barY, barX + barW, barY + 6, 0x00000000);
         String pct = power + "%";
         graphics.drawString(font, pct, x + COL_W - 8 - font.width(pct), y + 96, LED, false);
+
+        // 下潜/靠泊：一条整宽按钮把"启动/收回物理船"放进舵台，不再需要敲命令。
+        boolean physical = VsState.active();
+        String launchLabel = physical ? "靠泊（收成方块船）" : "下潜（启动物理船）";
+        int btnY = y + 108;
+        boolean btnHover = mouseX >= x + 8 && mouseX < x + COL_W - 8
+                && mouseY >= btnY && mouseY < btnY + 14;
+        graphics.fill(x + 8, btnY, x + COL_W - 8, btnY + 14,
+                physical ? 0xFF2A4A44 : btnHover ? 0xFF39483A : BTN_BG);
+        graphics.fill(x + 8, btnY, x + COL_W - 8, btnY + 1, BOX_EDGE);
+        graphics.drawCenteredString(font, launchLabel, x + COL_W / 2, btnY + 3,
+                physical ? 0xFF9FE8C8 : TEXT);
     }
 
     private void drawManualPanel(GuiGraphics graphics, int x, int y, int mouseX, int mouseY) {
@@ -804,6 +817,12 @@ public class SonarScreen extends AbstractContainerScreen<SonarMenu> {
 
         int x = leftPos + COL_X;
         int sy = topPos + SONAR_BOX_Y;
+        // 下潜/靠泊按钮（舵台底部整宽）：
+        if (inRect(mouseX, mouseY, x + 8, topPos + HELM_BOX_Y + 108, COL_W - 16, 14)) {
+            ModNetwork.send(new ShipActionPacket(menu.sonarPos(), VsState.active()
+                    ? ShipActionPacket.DOCK : ShipActionPacket.LAUNCH));
+            return true;
+        }
         if (inRect(mouseX, mouseY, x + 4, sy + 6, 130, 14)) {
             setMode(SonarScan.Mode.PASSIVE);
             return true;

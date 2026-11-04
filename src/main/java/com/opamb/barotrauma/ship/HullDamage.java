@@ -1,6 +1,9 @@
 package com.opamb.barotrauma.ship;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
@@ -140,6 +143,37 @@ public final class HullDamage {
         }
         health.clear();
         health.putAll(other.health);
+    }
+
+    /**
+     * 序列化成 {@code [{pos: long, hp: float}, ...]}；坐标是 {@link BlockPos#asLong()}。
+     * 键的坐标空间由调用方决定（方块船=世界坐标，物理船=装配快照坐标）。
+     */
+    public ListTag saveNbt() {
+        ListTag list = new ListTag();
+        for (Map.Entry<BlockPos, Float> entry : sortedEntries()) {
+            CompoundTag tag = new CompoundTag();
+            tag.putLong("pos", entry.getKey().asLong());
+            tag.putFloat("hp", entry.getValue());
+            list.add(tag);
+        }
+        return list;
+    }
+
+    /** 逆操作；越界比例夹紧，满血记录丢弃。 */
+    public void loadNbt(ListTag list) {
+        health.clear();
+        if (list == null) {
+            return;
+        }
+        for (int i = 0; i < list.size(); i++) {
+            CompoundTag tag = list.getCompound(i);
+            float hp = Math.max(0.0F, Math.min(1.0F, tag.getFloat("hp")));
+            if (hp >= 1.0F - EPSILON) {
+                continue;
+            }
+            health.put(BlockPos.of(tag.getLong("pos")), hp);
+        }
     }
 
     /** 按坐标排序的快照：发包和测试都要求顺序稳定。 */

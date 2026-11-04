@@ -61,10 +61,15 @@ public final class OceanEnvironment {
         if (pos == null) {
             return false;
         }
-        return Math.abs(pos.x) <= OutpostBuilder.HALF_X
+        if (Math.abs(pos.x) <= OutpostBuilder.HALF_X
                 && Math.abs(pos.z) <= OutpostBuilder.HALF_Z
                 && pos.y >= OutpostBuilder.MIN_Y
-                && pos.y <= OutpostBuilder.MAX_Y;
+                && pos.y <= OutpostBuilder.MAX_Y) {
+            return true;
+        }
+        // B 中继站（任务交付点）的内部干燥区
+        BlockPos block = BlockPos.containing(pos);
+        return PoiNetwork.isInsideOutpostBDryZone(block);
     }
 
     /**

@@ -13,6 +13,19 @@ edges:
   - target: patterns/vs2-physical-ship.md
     condition: when the ship is a VS2 physical ship
 last_updated: 2026-11-04
+mex:
+  id: mx_01M6GX58H7XEYC0Q58QBFE0FMY
+  type: pattern
+  status: promoted
+  revision: 3
+  title: debug-hull-damage
+  relations:
+    - type: related_to
+      target: mx_01M6FTV7HFY90PQMFBX26T2438
+      note: when a block finally breaks and you need to verify breach inflow
+    - type: related_to
+      target: mx_01M6FTV7VPSPV6F87V82ZGWGX4
+      note: when the ship is a VS2 physical ship
 ---
 
 # Debug Hull Damage

@@ -21,6 +21,9 @@ public final class UnderwaterSurvival {
     private UnderwaterSurvival() {
     }
 
+    /** 深水挤压的节流计数（60 tick = 3 秒）。 */
+    private static int pressureAccumulator;
+
     @SubscribeEvent
     public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) {
@@ -44,6 +47,15 @@ public final class UnderwaterSurvival {
             if (player.getAirSupply() <= -20) {
                 player.setAirSupply(0);
                 player.hurt(player.damageSources().drown(), 2.0F);
+            }
+            // P3：深水挤压——300m 以下裸潜每 3 秒 1 点（任务最深 600m，出舱拿黑匣子要快）
+            double depth = -player.getEyePosition().y;
+            pressureAccumulator++;
+            if (depth > com.opamb.barotrauma.ship.ShipPressure.PLAYER_SAFE_DEPTH
+                    && pressureAccumulator >= 60) {
+                pressureAccumulator = 0;
+                player.hurt(player.damageSources().generic(), 
+                        com.opamb.barotrauma.ship.ShipPressure.PLAYER_DAMAGE_PER_SECOND * 3.0F);
             }
         } else {
             refill(player);

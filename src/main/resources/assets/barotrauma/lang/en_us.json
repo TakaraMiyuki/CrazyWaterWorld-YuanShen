@@ -13,5 +13,11 @@
   "tooltip.barotrauma.welding_tool": "Hold right-click to weld hull plates",
   "message.barotrauma.hull_broken": "Hull breached!",
   "message.barotrauma.hull_sonar": "The sonar is the ship's brain - it can't be removed",
-  "message.barotrauma.welding_empty": "Welding tool out of fuel"
+  "message.barotrauma.welding_empty": "Welding tool out of fuel",
+  "block.barotrauma.mission_terminal": "Mission Terminal",
+  "block.barotrauma.black_box_block": "Black Box",
+  "item.barotrauma.mission_terminal": "Mission Terminal",
+  "item.barotrauma.black_box_block": "Black Box",
+  "item.barotrauma.black_box": "Black Box",
+  "item.barotrauma.supply_crate": "Supply Crate"
 }

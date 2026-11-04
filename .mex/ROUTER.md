@@ -18,6 +18,8 @@ edges:
     condition: when adding a new submarine hull block
   - target: patterns/debug-ship-water.md
     condition: when a ship is dry, flooding incorrectly, or missing water visuals
+  - target: patterns/debug-hull-damage.md
+    condition: when hull durability, damage bars, welding, or breach-on-zero-HP behavior looks wrong
   - target: patterns/run-tests.md
     condition: when building or running the verification layers
   - target: patterns/vs2-physical-ship.md
@@ -36,18 +38,19 @@ Then read this file fully before doing anything else in this session.
 **Working:**
 - 1.20.1 Forge mod builds and loads; air-ocean deep dimension, outposts, and starter submarine generate.
 - VS2 physical ships: launch, dock, thruster control, breach reconciliation, sonar proxy, and water-state sync.
+- **Minimum gameplay loop (2026-11-04, local work merged on top of `8751a00`, uncommitted):** mission terminal (main outpost `8,-63,0` + B relay station at `320,-300`), 5 missions (salvage×3 / recon / delivery), credits + shop (repair/oxygen/welder/hull upgrade), deterministic POI wrecks, sonar-screen「下潜/靠泊」buttons, first-login guidance + objective HUD, pressure/collision threats.
+- **Persistence:** `data/ShipSavedData` (assembled snapshot + hull damage + shipId + proxy), block-ship hull damage in block-entity NBT, VS2 world-load adoption (`VsPilot.adoptFromSave` + shipyard chunk force-load). `.smoketest-persist` PASS (`船=true 耐久记录=2`), `.smoketest-mission` PASS.
 - Per-compartment scalar water simulation, breach inflow splash/bubbles, ballast, pumps, reactor, and `/barotrauma ship flood` diagnostics.
 - Per-block hull durability (plating 200 / glass 100), melee + explosion + block-ship collision damage, welding-tool repair, camera-facing billboard bars (readable at any view angle), vanilla-style cracks (all 6 faces, outside-visible), damage-scaled leak splashes, and `ShipHullDamagePacket` sync.
 - Sonar screen/hologram, depth HUD, underwater fog, movement drag, and oxygen/drowning survival.
-- L1 unit tests (including `HullDamageTest`, `ShipPocketWaterTest`, `ShipWaterStateBuilderTest`) pass; 3 GameTests and L3 `.smoketest-vs` passed earlier.
+- L1 unit tests (42, including `HullDamageNbtTest`) pass; 3 GameTests and L3 `.smoketest-vs` passed earlier.
 
 **Not yet built:**
-- Physical-ship persistence and world-load adoption (`VsPilot` is reset on server lifecycle).
 - Multi-ship support (one `VsPilot` singleton manages one physical ship).
 - Per-block water surface geometry (compartments are sent as greedy rectangular prisms; no per-cell fluid surface).
-- Physical-ship collision → hull damage (VS2 2.4.11 collision event is not wired; only player melee, explosions, and block-ship collisions damage hulls).
-- Tier/upgrade system for `hullHealthMultiplier` (official `increasewallhealth` is +20%/level, capped by T1/T2/T3 at 2/4/6 levels).
-- Hull-durability persistence across world save or VS2 dismantle/relaunch.
+- Physical-ship collision → hull damage via a VS2 collision callback (currently an AABB sampling fallback).
+- Tier/upgrade system beyond the shop's flat +20%/level `hullHealthMultiplier` (no T1/T2/T3 caps yet).
+- Compartment water volume / ship oxygen persistence across reload (hull damage and upgrade level persist; water does not).
 - Migration of old saves containing real water or removed `hull_plug` blocks.
 
 **Known issues:**
@@ -57,7 +60,8 @@ Then read this file fully before doing anything else in this session.
 - `ShipWaterRenderer` draws compartment water client-side by default (10 Hz packet + per-frame interpolation); the air ocean still has no real water blocks. Disable with `-Dbarotrauma.renderWater=false` when isolating data vs render issues.
 - The existing `run/world` predates the air-ocean change; L3 `.smoketest-vs` currently stops with “找不到 9×9×9 空气空腔” until `run/world` is deleted and regenerated.
 - `docs/IMPLEMENTATION.md` still describes the older water-column world; prefer the code and `.mex/context/architecture.md` when they conflict.
-- Hull damage is runtime-only and is not included in any save format; don’t promise persistent repair progress yet.
+- **Local MVP work is uncommitted** on top of upstream `8751a00` (46 files); commit/push need explicit human authorization. The running `run-client` is still the pre-merge build.
+- Full manual playthrough of the 7-step loop (terminal → dive → salvage → dock → turn in → upgrade → quit/reload) has not been done on the merged build; automated coverage is `.smoketest-mission` + `.smoketest-persist`, and a 73-minute idle-render soak showed 0 OOM.
 - The hull damage bar is a world-space billboard (not a block texture); if it is missing, load `patterns/debug-hull-damage.md` before touching the water renderer.
 
 ## Routing Table
@@ -72,6 +76,7 @@ Load the relevant file based on the current task. Always load `context/architect
 | Making a design decision | `context/decisions.md` |
 | Setting up or running the project | `context/setup.md` |
 | Changing dev scripts, textures, or GameTest templates | `context/tools.md` |
+| Debugging hull damage, durability bars, or welding | `patterns/debug-hull-damage.md` |
 | Any specific task | Check `patterns/INDEX.md` for a matching pattern |
 
 ## Behavioural Contract

@@ -44,6 +44,18 @@ public final class ModItems {
     public static final RegistryObject<Item> SONAR = blockItem("sonar", ModShipBlocks.SONAR);
     public static final RegistryObject<Item> STATION_PLATING = blockItem("station_plating", ModShipBlocks.STATION_PLATING);
 
+    // ---- 任务/经济 ----
+    public static final RegistryObject<Item> MISSION_TERMINAL =
+            blockItem("mission_terminal", ModBlocks.MISSION_TERMINAL);
+    public static final RegistryObject<Item> BLACK_BOX_BLOCK_ITEM =
+            blockItem("black_box_block", ModBlocks.BLACK_BOX_BLOCK);
+    /** 黑匣子（物品）：打捞任务的交付物，沉船里的 black_box_block 掉落。 */
+    public static final RegistryObject<Item> BLACK_BOX = ITEMS.register("black_box",
+            () -> new Item(new Item.Properties()));
+    /** 补给箱（物品）：DELIVERY 任务的货物，接任务时发，送到 B 中继站交付。 */
+    public static final RegistryObject<Item> SUPPLY_CRATE = ITEMS.register("supply_crate",
+            () -> new Item(new Item.Properties()));
+
     private ModItems() {
     }
 

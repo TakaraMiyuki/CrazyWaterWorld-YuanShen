@@ -7,6 +7,8 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.opamb.barotrauma.BarotraumaMod;
 import com.opamb.barotrauma.blockentity.ShipCoreBlockEntity;
+import com.opamb.barotrauma.data.MissionSavedData;
+import com.opamb.barotrauma.mission.Mission;
 import com.opamb.barotrauma.registry.ModBlocks;
 import com.opamb.barotrauma.registry.ModShipBlocks;
 import com.opamb.barotrauma.ship.ShipCores;
@@ -89,6 +91,15 @@ public final class DeepSeaEvents {
         player.getPersistentData().putBoolean(VISITED_TAG, true);
         // 登录事件里直接传送容易被打断，推迟到下一 tick。
         server.execute(() -> sendToOutpost(player));
+        // 新手引导：不依赖文档，聊天里说清楚第一步；左上角还有常驻目标 HUD（ObjectiveOverlay）。
+        player.sendSystemMessage(Component.literal("欢迎来到《潜渊症》深海。你出生在哨站，门外码头上停着你的初始潜艇。")
+                .withStyle(ChatFormatting.AQUA));
+        player.sendSystemMessage(Component.literal("▸ 右键潜艇里的声纳台打开舵台，点「下潜」启动物理船")
+                .withStyle(ChatFormatting.GOLD));
+        player.sendSystemMessage(Component.literal("▸ WASD/空格/Shift 操舵；受损船壳用焊接工具右键修复；破口会进水，别沉了")
+                .withStyle(ChatFormatting.GOLD));
+        player.sendSystemMessage(Component.literal("▸ 返航后回声纳台点「靠泊」收船；深度越深海压越危险")
+                .withStyle(ChatFormatting.GRAY));
     }
 
     public static boolean sendToOutpost(ServerPlayer player) {
@@ -108,6 +119,162 @@ public final class DeepSeaEvents {
         // 门口那艘初始潜艇：出生点旁边就该有自己的船（第一次调用会现造 + 扫舱）
         StarterSub.ensure(deep);
         return true;
+    }
+
+    /** P4 持久化场景状态：phase1=装配+损伤+停服；phase2=断言认领。 */
+    private static boolean persistPhase1;
+    private static int persistTicks;
+
+    private static void tickPersistScenario(MinecraftServer server) {
+        if (persistTicks > 0) {
+            return; // 未到点
+        }
+        ServerLevel deep = server.getLevel(ModDimensions.THE_DEEP);
+        if (deep == null) {
+            server.halt(false);
+            return;
+        }
+        if (persistPhase1) {
+            ShipCoreBlockEntity core = StarterSub.ensure(deep);
+            if (core == null) {
+                BarotraumaMod.LOGGER.error("[smoketest-persist] 初始潜艇没造出来");
+                server.halt(false);
+                return;
+            }
+            ShipState state = core.state() != null ? core.state() : core.rescan(deep);
+            var blocks = state.collectBlocks(deep);
+            BarotraumaMod.LOGGER.info("[smoketest-persist] 装配：{}",
+                    VsPilot.launch(deep, blocks, state, core.getBlockPos()));
+            if (VsPilot.state() == null) {
+                BarotraumaMod.LOGGER.error("[smoketest-persist] 装配后没有物理船");
+                server.halt(false);
+                return;
+            }
+            // 损伤两格：直接走 HullDamage（等价被砸到 50%），验证耐久随存档往返
+            ShipState live = VsPilot.state();
+            var hulls = java.util.List.copyOf(live.geometry().hull());
+            live.hullDamage().applyDamage(hulls.get(4), 100.0F, 200.0F);
+            live.hullDamage().applyDamage(hulls.get(5), 100.0F, 200.0F);
+            VsPilot.syncAssembledRecord(deep);
+            BarotraumaMod.LOGGER.info("[smoketest-persist] 损伤格数={}，记录耐久={}，现在正常停服存档",
+                    live.hullDamage().entries().size(),
+                    com.opamb.barotrauma.data.ShipSavedData.get(deep).assembled()
+                            .hullDamage.entries().size());
+            server.halt(false);
+        } else {
+            boolean ok = VsPilot.hasShip() && VsPilot.state() != null;
+            int damageCount = ok ? VsPilot.state().hullDamage().entries().size() : -1;
+            BarotraumaMod.LOGGER.info("[smoketest-persist] 认领结果：船={} 耐久记录={}", ok, damageCount);
+            BarotraumaMod.LOGGER.info("[smoketest-persist] {}",
+                    ok && damageCount > 0 ? "PASS" : "FAIL");
+            server.halt(false);
+        }
+    }
+
+    /**
+     * P4 持久化场景的标记检测：匹配 .smoketest-persist / .smoketest-persist-check 就
+     * 设定场景阶段并返回 true（onServerStarted 里直接 return）。
+     */
+    private static boolean runPersistScenario(MinecraftServer server, File root, File fallback,
+                                              boolean checkPhase) {
+        File marker = root.isFile() ? root : (fallback.isFile() ? fallback : null);
+        if (marker == null) {
+            return false;
+        }
+        if (!marker.delete()) {
+            BarotraumaMod.LOGGER.warn("[smoketest-persist] 无法删除标记 {}", marker.getAbsolutePath());
+        }
+        ServerLevel deep = server.getLevel(ModDimensions.THE_DEEP);
+        if (deep == null || !VsSupport.available()) {
+            BarotraumaMod.LOGGER.error("[smoketest-persist] 维度或 VS2 不可用");
+            server.halt(false);
+            return true;
+        }
+        persistPhase1 = !checkPhase;
+        persistTicks = checkPhase ? 400 : 160;
+        BarotraumaMod.LOGGER.info("[smoketest-persist] 场景启动：{}", checkPhase ? "检查认领" : "装配+损伤");
+        return true;
+    }
+
+    /** P4 任务闭环场景：POI 存在性 + 任务状态机 + 经济，全服务端无玩家。 */
+    private static boolean runMissionScenario(MinecraftServer server, File root, File fallback) {
+        File marker = root.isFile() ? root : (fallback.isFile() ? fallback : null);
+        if (marker == null) {
+            return false;
+        }
+        if (!marker.delete()) {
+            BarotraumaMod.LOGGER.warn("[smoketest-mission] 无法删除标记 {}", marker.getAbsolutePath());
+        }
+        missionTicks = 200;
+        BarotraumaMod.LOGGER.info("[smoketest-mission] 场景启动");
+        return true;
+    }
+
+    private static int missionTicks;
+
+    /**
+     * P4 任务闭环场景（服务端、无玩家）：验证生成器把终端/沉船/黑匣子放进世界，
+     * 再用 MissionSavedData 走一遍 接取→达成→交付→credits，最后确认 300m 任务可接。
+     */
+    private static void tickMissionScenario(MinecraftServer server) {
+        ServerLevel deep = server.getLevel(ModDimensions.THE_DEEP);
+        if (deep == null) {
+            server.halt(false);
+            return;
+        }
+        var failures = new java.util.ArrayList<String>();
+
+        // 1) 主哨站终端
+        if (!deep.getBlockState(new BlockPos(8, ModDimensions.OUTPOST_SPAWN_Y - 1, 0))
+                .is(com.opamb.barotrauma.registry.ModBlocks.MISSION_TERMINAL.get())) {
+            failures.add("主哨站没有任务终端");
+        }
+        // 2) B 中继站终端
+        if (!deep.getBlockState(com.opamb.barotrauma.world.PoiNetwork.POST_B_TERMINAL)
+                .is(com.opamb.barotrauma.registry.ModBlocks.MISSION_TERMINAL.get())) {
+            failures.add("B 中继站没有任务终端");
+        }
+        // 3) 沉船 A 的黑匣子方块
+        if (!deep.getBlockState(com.opamb.barotrauma.world.PoiNetwork.WRECK_A)
+                .is(com.opamb.barotrauma.registry.ModBlocks.BLACK_BOX_BLOCK.get())) {
+            failures.add("沉船 A 里没有黑匣子方块");
+        }
+
+        // 4) 任务状态机 + 经济（合成 UUID 当虚拟玩家）
+        java.util.UUID tester = new java.util.UUID(0xBA12, 0x0C4E);
+        MissionSavedData data = MissionSavedData.get(deep);
+        var missions = data.missions();
+        Mission salvage1 = missions.get(1);
+        Mission deep300 = missions.get(2);
+
+        if (!data.accept(tester, 1, 0)) {
+            failures.add("接取任务 #1 失败");
+        } else if (salvage1.state() != Mission.State.ACTIVE) {
+            failures.add("任务 #1 接取后不是 ACTIVE");
+        }
+        data.markReady(salvage1);
+        if (salvage1.state() != Mission.State.READY) {
+            failures.add("任务 #1 markReady 后不是 READY");
+        }
+        data.finish(tester, salvage1);
+        if (data.credits(tester) != salvage1.reward || data.credits(tester) != 80) {
+            failures.add("交付 #1 后 credits != 80（实际 " + data.credits(tester) + "）");
+        }
+        if (salvage1.state() != Mission.State.DONE) {
+            failures.add("交付 #1 后不是 DONE");
+        }
+        if (!data.accept(tester, 2, 0)) {
+            failures.add("接取 300m 任务 #2 失败");
+        } else {
+            data.abandon(tester);
+            if (deep300.state() != Mission.State.OFFERED) {
+                failures.add("放弃 #2 后没有回到 OFFERED");
+            }
+        }
+
+        BarotraumaMod.LOGGER.info("[smoketest-mission] {}",
+                failures.isEmpty() ? "PASS" : "FAIL: " + String.join("; ", failures));
+        server.halt(false);
     }
 
     @SubscribeEvent
@@ -756,6 +923,26 @@ public final class DeepSeaEvents {
     public static void onServerStarted(ServerStartedEvent event) {
         // 新服务器不可能沿用上一个服务器的刚体；顺便兜住上次崩溃没走到 ServerStoppedEvent 的情况。
         resetShipRuntime("服务器启动");
+        // P1.2：世界里有装配记录就认领物理船（VS2 刚体懒加载，认领会自带 30 秒重试）。
+        // 推迟到下一 tick：ServerStarted 时 VS2 的船世界不一定就绪。
+        // 注意：必须放在 persist 场景分支之前，否则检查阶段 return 会跳过认领。
+        ServerLevel adoptDeep = event.getServer().getLevel(ModDimensions.THE_DEEP);
+        if (adoptDeep != null && VsSupport.available()) {
+            event.getServer().execute(() -> VsPilot.adoptFromSave(adoptDeep));
+        }
+        // P4 持久化实测（两段式）：
+        //   .smoketest-persist       → 造初始潜艇 + 装配成物理船 + 损伤两格，然后正常停服存档
+        //   .smoketest-persist-check → 依赖 onServerStarted 的认领，200 tick 后断言船已接回
+        if (runPersistScenario(event.getServer(), new File(".smoketest-persist"),
+                new File("run/.smoketest-persist"), false)
+                | runPersistScenario(event.getServer(), new File(".smoketest-persist-check"),
+                        new File("run/.smoketest-persist-check"), true)) {
+            return;
+        }
+        if (runMissionScenario(event.getServer(), new File(".smoketest-mission"),
+                new File("run/.smoketest-mission"))) {
+            return;
+        }
         // 隔离场景优先：run/.smoketest-vs 只跑 VsFloodSmoke（水面空腔灌水实验），不跑总自检
         File vsMarker = new File(".smoketest-vs");
         if (!vsMarker.isFile()) {
@@ -921,8 +1108,24 @@ public final class DeepSeaEvents {
         if (event.phase != net.minecraftforge.event.TickEvent.Phase.END) {
             return;
         }
+        if (persistTicks > 0) {
+            persistTicks--;
+            tickPersistScenario(event.getServer());
+            return;
+        }
+        if (missionTicks > 0) {
+            missionTicks--;
+            if (missionTicks == 0) {
+                tickMissionScenario(event.getServer());
+            }
+            return;
+        }
         // 物理船：补挂上一 tick 没挂上的推进器（VS2 装配后要过一 tick 才认这艘船）
         if (VsSupport.available()) {
+            ServerLevel deep = event.getServer().getLevel(ModDimensions.THE_DEEP);
+            if (deep != null) {
+                VsPilot.tryAdoptTick(deep);
+            }
             VsPilot.tick();
         }
         // 隔离场景（.smoketest-vs）：自己管自己的节奏，跑完关服

@@ -13,5 +13,11 @@
   "tooltip.barotrauma.welding_tool": "右键持续焊接船壳（消耗燃料）",
   "message.barotrauma.hull_broken": "船体破损！",
   "message.barotrauma.hull_sonar": "声纳是船脑，不能拆",
-  "message.barotrauma.welding_empty": "焊接工具燃料耗尽"
+  "message.barotrauma.welding_empty": "焊接工具燃料耗尽",
+  "block.barotrauma.mission_terminal": "任务终端",
+  "block.barotrauma.black_box_block": "黑匣子",
+  "item.barotrauma.mission_terminal": "任务终端",
+  "item.barotrauma.black_box_block": "黑匣子",
+  "item.barotrauma.black_box": "黑匣子",
+  "item.barotrauma.supply_crate": "补给箱"
 }

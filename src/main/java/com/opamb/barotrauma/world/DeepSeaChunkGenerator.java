@@ -182,6 +182,9 @@ public class DeepSeaChunkGenerator extends ChunkGenerator {
             OutpostBuilder.build(chunk);
         }
 
+        // 6b) 任务 POI：沉船/侦察点/B 中继站（确定性，幂等）
+        PoiNetwork.buildInto(chunk);
+
         // 7) 高度图
         Heightmap.primeHeightmaps(chunk,
                 EnumSet.of(Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG));

@@ -127,6 +127,13 @@ public final class OutpostBuilder {
         if (inChunk(pos, 0, HALF_Z)) {
             placeDoor(chunk, 0, ModDimensions.OUTPOST_SPAWN_Y, HALF_Z);
         }
+
+        // 任务终端：前厅右侧（医疗间门口），接任务/交付/商店都在这里
+        if (inChunk(pos, 8, 0)) {
+            chunk.setBlockState(new BlockPos(8, ModDimensions.OUTPOST_SPAWN_Y - 1, 0),
+                    com.opamb.barotrauma.registry.ModBlocks.MISSION_TERMINAL.get().defaultBlockState(),
+                    false);
+        }
     }
 
     private static BlockState stateAt(int x, int y, int z) {

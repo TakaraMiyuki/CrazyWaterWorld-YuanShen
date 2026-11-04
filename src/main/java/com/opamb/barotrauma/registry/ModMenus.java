@@ -22,6 +22,10 @@ public final class ModMenus {
     public static final RegistryObject<MenuType<com.opamb.barotrauma.menu.SonarMenu>> SONAR =
             MENUS.register("sonar", () -> IForgeMenuType.create(com.opamb.barotrauma.menu.SonarMenu::new));
 
+    public static final RegistryObject<MenuType<com.opamb.barotrauma.menu.MissionMenu>> MISSION_TERMINAL =
+            MENUS.register("mission_terminal", () -> IForgeMenuType.create(
+                    (id, inv, buf) -> new com.opamb.barotrauma.menu.MissionMenu(id, buf.readBlockPos())));
+
     private ModMenus() {
     }
 

@@ -5,9 +5,15 @@ import com.opamb.barotrauma.network.ModNetwork;
 import com.opamb.barotrauma.network.ShipHullDamagePacket;
 import com.opamb.barotrauma.registry.ModBlockEntities;
 import com.opamb.barotrauma.registry.ModShipBlocks;
+import com.opamb.barotrauma.ship.HullDamage;
 import com.opamb.barotrauma.ship.MachineCount;
 import com.opamb.barotrauma.ship.ShipGeometry;
 import com.opamb.barotrauma.ship.ShipState;
+import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
@@ -43,6 +49,11 @@ public class ShipCoreBlockEntity extends BlockEntity {
 
     @Nullable
     private ShipState state;
+    /** 世界加载时从 NBT 恢复的耐久；重扫时并入（previous 为空的那条路径）。 */
+    @Nullable
+    private HullDamage pendingDamage;
+    @Nullable
+    private Float pendingMultiplier;
     private long lastTickGameTime = Long.MIN_VALUE;
     /** 方块船的水面同步计时。 */
     private long lastWaterSyncGameTime = Long.MIN_VALUE;
@@ -86,6 +97,11 @@ public class ShipCoreBlockEntity extends BlockEntity {
             return;
         }
         if (be.state != null) {
+            // P3：方块船也吃海压（深度 = 核心所在深度）
+            if (com.opamb.barotrauma.ship.ShipPressure.tick((ServerLevel) level,
+                    be.state, -pos.getY())) {
+                be.setChanged();
+            }
             be.state.simulation().tick(0.1D);
             // 破口进水：连海空腔（船体破洞）按速率缓慢灌水，而不是瞬间满
             be.state.simulation().tickSeaFlood(0.1D, -pos.getY());
@@ -146,6 +162,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
             level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
             ShipState next = rescan(level);
             next.removeBreach(pos);
+            setChanged();
             sendHullDamage(level, true);
             return true;
         }
@@ -162,6 +179,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
                 // 创造模式客户端会预测“方块没了”，取消破坏后必须把真实状态发回去。
                 player.connection.send(new ClientboundBlockUpdatePacket(level, pos));
             }
+            setChanged();
             sendHullDamage(level, true);
         }
         return true;
@@ -195,6 +213,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
             level.setBlock(pos, block.setValue(HullBlock.BREACHED, false), 3);
             rescan(level);
         }
+        setChanged();
         sendHullDamage(level, true);
         return true;
     }
@@ -249,6 +268,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
             } else if (!broken.isEmpty()) {
                 rescan(level);
             }
+            setChanged();
             sendHullDamage(level, true);
         }
         return hit;
@@ -281,6 +301,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
             player.displayClientMessage(Component.translatable("message.barotrauma.hull_broken")
                     .withStyle(ChatFormatting.RED), true);
         }
+        setChanged();
         sendHullDamage(level, true);
     }
 
@@ -378,7 +399,15 @@ public class ShipCoreBlockEntity extends BlockEntity {
             state.hullDamage().copyFrom(previous.hullDamage());
             state.setHullHealthMultiplier(previous.hullHealthMultiplier());
             state.hullDamage().retain(pos -> ModShipBlocks.isRepairableHull(level.getBlockState(pos)));
+        } else if (pendingDamage != null) {
+            // 世界重开后的第一次重扫：把区块 NBT 里存下来的耐久接回来，
+            // 否则 10%~90% 的部分损伤会全部凭空满血。
+            state.hullDamage().copyFrom(pendingDamage);
+            state.setHullHealthMultiplier(pendingMultiplier != null ? pendingMultiplier : 1.0F);
+            state.hullDamage().retain(pos -> ModShipBlocks.isRepairableHull(level.getBlockState(pos)));
         }
+        pendingDamage = null;
+        pendingMultiplier = null;
         // breached 方块仍然是 ship block（hull 集合里有它），但不再实心；
         // 重新加载后耐久表是空的，必须按 blockstate 补回 0%，否则焊不回去。
         List<BlockPos> breached = new ArrayList<>();
@@ -402,6 +431,7 @@ public class ShipCoreBlockEntity extends BlockEntity {
         state.simulation().setBreachSize(Math.max(1, broken.size() + breached.size()));
         // 重扫可能把“已经被别的东西弄没的方块”从耐久表里清掉；必须发一次，
         // 否则客户端会在空气位置继续画旧血条。
+        setChanged();
         sendHullDamage(level, true);
         return state;
     }
@@ -409,5 +439,29 @@ public class ShipCoreBlockEntity extends BlockEntity {
     @Nullable
     public ShipState state() {
         return state;
+    }
+
+    // ------------------------------------------------------------------ 持久化
+
+    /** 方块船的耐久随区块存档：世界重开后 partial damage 不再清零。 */
+    @Override
+    protected void saveAdditional(CompoundTag tag) {
+        super.saveAdditional(tag);
+        if (state != null) {
+            tag.put("BarotraumaHullDamage", state.hullDamage().saveNbt());
+            tag.putFloat("BarotraumaHullMultiplier", state.hullHealthMultiplier());
+        }
+    }
+
+    @Override
+    public void load(CompoundTag tag) {
+        super.load(tag);
+        if (tag.contains("BarotraumaHullDamage", Tag.TAG_LIST)) {
+            HullDamage restored = new HullDamage();
+            restored.loadNbt(tag.getList("BarotraumaHullDamage", Tag.TAG_COMPOUND));
+            pendingDamage = restored;
+        }
+        pendingMultiplier = tag.contains("BarotraumaHullMultiplier")
+                ? tag.getFloat("BarotraumaHullMultiplier") : null;
     }
 }

@@ -68,6 +68,12 @@ public final class StarterSub {
             BarotraumaMod.LOGGER.info("[Barotrauma] 当前物理船不是初始潜艇（core={}），继续检查初始潜艇",
                     activeCore);
         }
+        // 已发过船就不能再造：装配走/靠泊在别处/世界重开后刚体还没认领，
+        // 原位看起来都是空的，但再来一艘就是"两艘初始潜艇"。
+        if (com.opamb.barotrauma.data.ShipSavedData.get(level).starterClaimed()) {
+            BarotraumaMod.LOGGER.info("[Barotrauma] 初始潜艇已认领过，跳过重建");
+            return null;
+        }
         // 必须先把区块加载出来：Level#getBlockEntity 对未加载区块返回 null，
         // 世界重开后船其实还在，却会被判成"没造过"。
         level.getChunk(corePos.getX() >> 4, corePos.getZ() >> 4);
@@ -117,6 +123,7 @@ public final class StarterSub {
         // 声纳台就是船脑（在上面的机器布局里已经放下去了），这里直接拿它的方块实体扫一次
         if (level.getBlockEntity(corePos) instanceof ShipCoreBlockEntity core) {
             core.rescan(level);
+            com.opamb.barotrauma.data.ShipSavedData.get(level).markStarterClaimed();
             BarotraumaMod.LOGGER.info("[Barotrauma] 初始潜艇已建造：core={} 范围 {}x{}x{}",
                     corePos, SIZE_X, SIZE_Y, SIZE_Z);
             return core;

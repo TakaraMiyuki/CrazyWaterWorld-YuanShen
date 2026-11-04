@@ -2,6 +2,7 @@ package com.opamb.barotrauma.registry;
 
 import com.opamb.barotrauma.BarotraumaMod;
 import com.opamb.barotrauma.block.HullBlock;
+import com.opamb.barotrauma.block.MissionTerminalBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
@@ -31,6 +32,20 @@ public final class ModBlocks {
                     .requiresCorrectToolForDrops()
                     .isViewBlocking((state, level, pos) -> !HullBlock.isBreached(state))
                     .isSuffocating((state, level, pos) -> !HullBlock.isBreached(state))));
+
+    /** 任务终端：接任务/交付/商店的界面入口（哨站和 B 中继站各一台）。 */
+    public static final RegistryObject<Block> MISSION_TERMINAL = BLOCKS.register("mission_terminal",
+            () -> new MissionTerminalBlock(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.COLOR_CYAN)
+                    .strength(15.0F, 1200.0F)
+                    .sound(SoundType.METAL)));
+
+    /** 黑匣子方块：沉船船舱里那一格，打掉掉落 black_box（打捞任务的交付物）。 */
+    public static final RegistryObject<Block> BLACK_BOX_BLOCK = BLOCKS.register("black_box_block",
+            () -> new Block(BlockBehaviour.Properties.of()
+                    .mapColor(MapColor.COLOR_ORANGE)
+                    .strength(3.0F, 6.0F)
+                    .sound(SoundType.METAL)));
 
     private ModBlocks() {
     }

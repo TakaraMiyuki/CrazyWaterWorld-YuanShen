@@ -31,6 +31,10 @@ public final class ModNetwork {
                 SonarDataPacket::encode, SonarDataPacket::decode, SonarDataPacket::handle);
         CHANNEL.registerMessage(nextId++, ShipWaterStatePacket.class,
                 ShipWaterStatePacket::encode, ShipWaterStatePacket::decode, ShipWaterStatePacket::handle);
+        CHANNEL.registerMessage(nextId++, MissionStatePacket.class,
+                MissionStatePacket::encode, MissionStatePacket::decode, MissionStatePacket::handle);
+        CHANNEL.registerMessage(nextId++, MissionActionPacket.class,
+                MissionActionPacket::encode, MissionActionPacket::decode, MissionActionPacket::handle);
         CHANNEL.registerMessage(nextId++, ShipHullDamagePacket.class,
                 ShipHullDamagePacket::encode, ShipHullDamagePacket::decode, ShipHullDamagePacket::handle);
     }

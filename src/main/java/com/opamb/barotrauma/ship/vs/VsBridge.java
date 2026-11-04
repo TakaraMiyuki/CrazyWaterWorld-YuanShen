@@ -264,4 +264,83 @@ public final class VsBridge {
         LoadedServerShip loaded = loaded(level, ship);
         return loaded == null ? null : loaded.getAttachment(VsThruster.class);
     }
+
+    // ------------------------------------------------------------------ 认领（P1.2）
+
+    /**
+     * 按 id 找已加载的刚体；找不到返回 null。
+     *
+     * <p>世界刚加载时 VS2 可能还没把船放进 loaded 集合（懒加载），调用方要容忍
+     * 暂时为空并重试，不能一次找不到就判定船丢了。</p>
+     */
+    public static ServerShip shipById(ServerLevel level, long id) {
+        try {
+            VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
+            return world == null ? null : world.getLoadedShips().getById(id);
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /**
+     * 认领路径专用：按 id 从**存档数据**里找船（不管物理加载没有），找到就顺手把
+     * 船坞区块 sync 加载出来（VS2 靠区块加载事件把船放进 loaded 集合）。
+     *
+     * <p>返回值：null = 存档里也没有这条 id（真丢了）；非 null = 数据存在，
+     * 可能已经加载（直接可用），也可能刚把船坞区块拉起来、下一 tick 才进 loaded。</p>
+     */
+    public static ServerShip ensureShipDataLoaded(ServerLevel level, long id) {
+        try {
+            VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
+            if (world == null) {
+                return null;
+            }
+            ServerShip loaded = world.getLoadedShips().getById(id);
+            if (loaded != null) {
+                return loaded;
+            }
+            ServerShip data = world.getAllShips().getById(id);
+            if (data == null) {
+                return null;
+            }
+            var claim = data.getChunkClaim();
+            if (claim != null) {
+                int cx = claim.getXMiddle() >> 4;
+                int cz = claim.getZMiddle() >> 4;
+                for (int dx = -2; dx <= 2; dx++) {
+                    for (int dz = -2; dz <= 2; dz++) {
+                        level.getChunk(cx + dx, cz + dz);
+                    }
+                }
+            }
+            return data;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /** 位置最近的刚体（id 跨存档不稳定时的退路）；maxDistance 米内没有返回 null。 */
+    public static ServerShip nearestShip(ServerLevel level, double x, double y, double z,
+                                         double maxDistance) {
+        try {
+            VsiServerShipWorld world = VSGameUtilsKt.getShipObjectWorld(level);
+            if (world == null) {
+                return null;
+            }
+            ServerShip best = null;
+            double bestDist = maxDistance * maxDistance;
+            for (ServerShip candidate : world.getLoadedShips()) {
+                Vector3dc p = candidate.getTransform().getPositionInWorld();
+                double dist = (p.x() - x) * (p.x() - x)
+                        + (p.y() - y) * (p.y() - y) + (p.z() - z) * (p.z() - z);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = candidate;
+                }
+            }
+            return best;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
 }
