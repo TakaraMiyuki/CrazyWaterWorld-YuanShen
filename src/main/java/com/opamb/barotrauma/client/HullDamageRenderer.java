@@ -17,6 +17,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
@@ -35,7 +36,9 @@ import org.valkyrienskies.core.api.ships.properties.ShipTransform;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 受损船壳的客户端表现：原版裂痕 + 水滴 + 方块上的耐久条。
@@ -169,9 +172,9 @@ public final class HullDamageRenderer {
         PoseStack pose = event.getPoseStack();
         Matrix4f matrix = pose.last().pose();
 
-        drawCracks(mc, matrix, targets, toWorld, cameraPos);
+        drawCracks(mc, level, matrix, targets, toWorld, cameraPos);
         drawBars(mc, camera, matrix, targets, cameraPos);
-        spawnLeakParticles(level, targets, cameraPos);
+        spawnLeakParticles(level, targets, cameraPos, toWorld);
     }
 
     // ------------------------------------------------------------------ 裂痕
@@ -188,7 +191,7 @@ public final class HullDamageRenderer {
     private static final MultiBufferSource.BufferSource BAR_BUFFERS =
             MultiBufferSource.immediate(BAR_BUILDER);
 
-    private static void drawCracks(Minecraft mc, Matrix4f matrix, List<Target> targets,
+    private static void drawCracks(Minecraft mc, ClientLevel level, Matrix4f matrix, List<Target> targets,
                                    Matrix4d toWorld, Vec3 cameraPos) {
         VertexConsumer vertices = CRACK_BUFFERS.getBuffer(CRACK_TYPE);
         for (Target target : targets) {
@@ -197,7 +200,7 @@ public final class HullDamageRenderer {
                 continue;
             }
             int stage = Mth.clamp((int) Math.ceil((1.0F - health) * 9.0F), 1, 9);
-            drawCrackCube(vertices, matrix, target.pos(), toWorld, cameraPos, crackSprite(stage));
+            drawCrackCube(level, vertices, matrix, target.pos(), toWorld, cameraPos, crackSprite(stage));
         }
         // 必须无条件 endBatch（空批次会被 discard）：复用的 builder 若留在 begun 状态，
         // 下一帧 getBuffer 会继续往里累积，顶点坐标跨帧错乱。
@@ -215,49 +218,105 @@ public final class HullDamageRenderer {
     }
 
     /**
-     * 六个面都画。只画“最近面”在方块被相邻方块挡住/斜看时会完全看不到裂痕；
-     * 现在方块模型正常渲染，背面裂痕会被深度测试挡住，六面画不会出现透视，
-     * 但能保证任何朝向都能看到损伤。
+     * 六个面都画，但逐面区分"露出/被盖住"（issue #14）：
+     *
+     * <p>统一外扩 0.003 的旧写法有两个问题：①顶面绕序反了（法线朝内，被
+     * crumbling 的背面剔除剔掉——舱内永远看不到舱顶裂痕）；②被相邻实心船壳
+     * 盖住的面，贴面外扩 0.003 会伸进邻居方块体积里，被邻居的表面深度测试
+     * 挡死——舱壁贴着舱壁的那些面永远看不到裂痕。</p>
+     *
+     * <p>现在的规则：露出的面外扩 0.003（避开与自己方块的 z-fighting）；
+     * 被盖住的面画<strong>共面</strong>（和邻居表面等深，LEQUAL 深度测试通过、
+     * 本批次在地形之后绘制，所以正常叠显——与原版破坏叠加层同机制）。
+     * 绕序按叉积逐面验证过（从方块外看逆时针），不再手写六组坐标。</p>
      */
-    private static void drawCrackCube(VertexConsumer vertices, Matrix4f matrix, BlockPos pos,
-                                      Matrix4d toWorld, Vec3 cameraPos, TextureAtlasSprite sprite) {
-        double inflate = 0.003D;
-        double x0 = pos.getX() - inflate;
-        double y0 = pos.getY() - inflate;
-        double z0 = pos.getZ() - inflate;
-        double x1 = pos.getX() + 1.0D + inflate;
-        double y1 = pos.getY() + 1.0D + inflate;
-        double z1 = pos.getZ() + 1.0D + inflate;
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0);
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1);
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1);
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0);
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x0, y0, z0, x0, y0, z1, x1, y0, z1, x1, y0, z0);
-        crackFace(vertices, matrix, toWorld, cameraPos, sprite,
-                x0, y1, z1, x1, y1, z1, x1, y1, z0, x0, y1, z0);
+    private static void drawCrackCube(ClientLevel level, VertexConsumer vertices, Matrix4f matrix,
+                                      BlockPos pos, Matrix4d toWorld, Vec3 cameraPos,
+                                      TextureAtlasSprite sprite) {
+        for (Direction dir : Direction.values()) {
+            boolean covered = ShipCellFaces.isFaceCovered(level, pos, dir);
+            double inflate = covered ? 0.0D : 0.003D;
+            // 面所在平面的坐标：露出时向方块外抬 0.003，被盖住时贴齐方块边界
+            double fx = pos.getX() + 0.5D + dir.getStepX() * (0.5D + inflate);
+            double fy = pos.getY() + 0.5D + dir.getStepY() * (0.5D + inflate);
+            double fz = pos.getZ() + 0.5D + dir.getStepZ() * (0.5D + inflate);
+            double minX = pos.getX();
+            double minY = pos.getY();
+            double minZ = pos.getZ();
+            double maxX = pos.getX() + 1.0D;
+            double maxY = pos.getY() + 1.0D;
+            double maxZ = pos.getZ() + 1.0D;
+            for (Direction.Axis axis : Direction.Axis.values()) {
+                if (dir.getAxis() == axis) {
+                    continue;
+                }
+                // 侧向收 0.001，避免裂痕边角戳进垂直方向的相邻方块
+                double shrink = 0.001D;
+                switch (axis) {
+                    case X -> {
+                        minX = minX + shrink;
+                        maxX = maxX - shrink;
+                    }
+                    case Y -> {
+                        minY = minY + shrink;
+                        maxY = maxY - shrink;
+                    }
+                    case Z -> {
+                        minZ = minZ + shrink;
+                        maxZ = maxZ - shrink;
+                    }
+                    default -> {
+                    }
+                }
+            }
+            for (int[] corner : FACE_CORNERS.get(dir.ordinal())) {
+                double cx = axisValue(dir, corner[0], minX, fx, maxX);
+                double cy = axisValue(dir, corner[1], minY, fy, maxY);
+                double cz = axisValue(dir, corner[2], minZ, fz, maxZ);
+                float u = corner[3] == 0 ? sprite.getU0() : sprite.getU1();
+                float v = corner[4] == 0 ? sprite.getV0() : sprite.getV1();
+                crackVertex(vertices, matrix, toWorld, cameraPos, cx, cy, cz, u, v);
+            }
+        }
     }
 
-    private static void crackFace(VertexConsumer vertices, Matrix4f matrix, Matrix4d toWorld,
-                                  Vec3 cameraPos, TextureAtlasSprite sprite,
-                                  double x0, double y0, double z0,
-                                  double x1, double y1, double z1,
-                                  double x2, double y2, double z2,
-                                  double x3, double y3, double z3) {
-        float u0 = sprite.getU0();
-        float u1 = sprite.getU1();
-        float v0 = sprite.getV0();
-        float v1 = sprite.getV1();
-        // 必须逆时针（从方块外看）：1.20.1 的 crumbling RenderType 默认开背面剔除，
-        // 顺时针的面从外面看整面被剔掉——之前"只有钻进方块内部才看得见裂痕"就是这个原因。
-        crackVertex(vertices, matrix, toWorld, cameraPos, x3, y3, z3, u0, v0);
-        crackVertex(vertices, matrix, toWorld, cameraPos, x2, y2, z2, u1, v0);
-        crackVertex(vertices, matrix, toWorld, cameraPos, x1, y1, z1, u1, v1);
-        crackVertex(vertices, matrix, toWorld, cameraPos, x0, y0, z0, u0, v1);
+    /**
+     * 六个面的四角（从方块外看逆时针）+ 各角 UV。
+     * 每角 = {X 取值索引, Y 取值索引, Z 取值索引, u, v}；索引 0=min 侧、1=max 侧、2=面平面。
+     * 全部用叉积 (v1-v0)×(v2-v0) 验证过法线朝外。
+     */
+    private static final Map<Integer, int[][]> FACE_CORNERS = buildFaceCorners();
+
+    private static Map<Integer, int[][]> buildFaceCorners() {
+        Map<Integer, int[][]> out = new HashMap<>();
+        // -Z（北）：从 -Z 看逆时针
+        out.put(Direction.NORTH.ordinal(), new int[][]{
+                {1, 0, 2, 0, 1}, {0, 0, 2, 1, 1}, {0, 1, 2, 1, 0}, {1, 1, 2, 0, 0}});
+        // +Z（南）
+        out.put(Direction.SOUTH.ordinal(), new int[][]{
+                {0, 0, 2, 0, 1}, {1, 0, 2, 1, 1}, {1, 1, 2, 1, 0}, {0, 1, 2, 0, 0}});
+        // -X（西）
+        out.put(Direction.WEST.ordinal(), new int[][]{
+                {2, 0, 0, 0, 1}, {2, 0, 1, 1, 1}, {2, 1, 1, 1, 0}, {2, 1, 0, 0, 0}});
+        // +X（东）
+        out.put(Direction.EAST.ordinal(), new int[][]{
+                {2, 0, 1, 0, 1}, {2, 0, 0, 1, 1}, {2, 1, 0, 1, 0}, {2, 1, 1, 0, 0}});
+        // -Y（底）
+        out.put(Direction.DOWN.ordinal(), new int[][]{
+                {0, 2, 0, 0, 1}, {1, 2, 0, 1, 1}, {1, 2, 1, 1, 0}, {0, 2, 1, 0, 0}});
+        // +Y（顶）
+        out.put(Direction.UP.ordinal(), new int[][]{
+                {0, 2, 1, 0, 1}, {1, 2, 1, 1, 1}, {1, 2, 0, 1, 0}, {0, 2, 0, 0, 0}});
+        return out;
+    }
+
+    /** 按角索引取坐标：0=min 侧、1=max 侧、2=面平面。 */
+    private static double axisValue(Direction faceDir, int index, double min, double face, double max) {
+        return switch (index) {
+            case 0 -> min;
+            case 1 -> max;
+            default -> face;
+        };
     }
 
     private static void crackVertex(VertexConsumer vertices, Matrix4f matrix, Matrix4d toWorld,
@@ -397,7 +456,8 @@ public final class HullDamageRenderer {
 
     // ------------------------------------------------------------------ 水花
 
-    private static void spawnLeakParticles(ClientLevel level, List<Target> targets, Vec3 cameraPos) {
+    private static void spawnLeakParticles(ClientLevel level, List<Target> targets, Vec3 cameraPos,
+                                           Matrix4d toWorld) {
         // 5 Hz 检查，实际每个泄漏点每 0.5 秒喷 1~4 个水花。
         if (level.getGameTime() % 10L != 0L) {
             return;
@@ -406,19 +466,34 @@ public final class HullDamageRenderer {
             if (target.leak() <= 0.0F) {
                 continue;
             }
-            Vec3 towardCamera = cameraPos.subtract(target.center());
-            if (towardCamera.lengthSqr() < 1.0E-6D) {
-                continue;
+            // 贴"未被实心邻居盖住、且最朝向相机"的面（issue #14）：旧的相机侧 AABB
+            // 放置会把粒子放进相邻实心方块的体积里，某些朝向整片被挡。
+            Vec3 at = null;
+            Direction face = ShipCellFaces.pickVisibleFace(level, target.pos(), toWorld, cameraPos);
+            if (face != null) {
+                Vector3d faceCenter = toWorld.transformPosition(new Vector3d(
+                        target.pos().getX() + 0.5D + face.getStepX() * 0.5D,
+                        target.pos().getY() + 0.5D + face.getStepY() * 0.5D,
+                        target.pos().getZ() + 0.5D + face.getStepZ() * 0.5D), new Vector3d());
+                at = new Vec3(faceCenter.x + face.getStepX() * 0.06D,
+                        faceCenter.y + face.getStepY() * 0.06D,
+                        faceCenter.z + face.getStepZ() * 0.06D);
+            } else {
+                // 六面全被盖住（嵌墙格）：退回旧的相机侧放置，聊胜于无
+                Vec3 towardCamera = cameraPos.subtract(target.center());
+                if (towardCamera.lengthSqr() < 1.0E-6D) {
+                    continue;
+                }
+                Vec3 toward = towardCamera.normalize();
+                double faceDist = 0.5D / Math.max(Math.abs(toward.x),
+                        Math.max(Math.abs(toward.y), Math.abs(toward.z)));
+                at = target.center().add(toward.scale(faceDist + 0.08D));
             }
-            Vec3 toward = towardCamera.normalize();
-            double face = 0.5D / Math.max(Math.abs(toward.x),
-                    Math.max(Math.abs(toward.y), Math.abs(toward.z)));
-            Vec3 at = target.center().add(toward.scale(face + 0.08D));
             int count = target.leak() >= 0.9F ? 4 : 1;
             for (int i = 0; i < count; i++) {
-                double ox = (level.random.nextDouble() - 0.5D) * 0.35D;
-                double oy = (level.random.nextDouble() - 0.5D) * 0.35D;
-                double oz = (level.random.nextDouble() - 0.5D) * 0.35D;
+                double ox = (level.random.nextDouble() - 0.5D) * 0.30D;
+                double oy = (level.random.nextDouble() - 0.5D) * 0.30D;
+                double oz = (level.random.nextDouble() - 0.5D) * 0.30D;
                 level.addParticle(ParticleTypes.SPLASH,
                         at.x + ox, at.y + oy, at.z + oz,
                         (level.random.nextDouble() - 0.5D) * 0.05D,

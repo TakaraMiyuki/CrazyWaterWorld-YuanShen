@@ -19,6 +19,8 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import com.opamb.barotrauma.registry.ModParticles;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
@@ -909,6 +911,26 @@ public final class ShipWaterRenderer {
             double wx = cameraPos.x + WATER_SCRATCH.x;
             double wy = cameraPos.y + WATER_SCRATCH.y;
             double wz = cameraPos.z + WATER_SCRATCH.z;
+            // 粒子不能从破口格"中心"喷：0% 破口方块仍然渲染成实心，中心生成的
+            // 粒子整片被自己的方块挡住（issue #14）。贴到洞口所在的面上——
+            // 即未被实心邻居盖住、且最朝向相机的那一面。
+            BlockPos breachCell = BlockPos.containing(bx, by, bz);
+            Matrix4d breachToWorld = new Matrix4d()
+                    .translation(cameraPos.x, cameraPos.y, cameraPos.z)
+                    .mul(toCamera);
+            Direction holeFace = ShipCellFaces.pickVisibleFace(level, breachCell, breachToWorld, cameraPos);
+            double sx = wx;
+            double sy = wy;
+            double sz = wz;
+            if (holeFace != null) {
+                Vector3d faceCenter = breachToWorld.transformPosition(new Vector3d(
+                        breachCell.getX() + 0.5D + holeFace.getStepX() * 0.5D,
+                        breachCell.getY() + 0.5D + holeFace.getStepY() * 0.5D,
+                        breachCell.getZ() + 0.5D + holeFace.getStepZ() * 0.5D), new Vector3d());
+                sx = faceCenter.x + holeFace.getStepX() * 0.05D;
+                sy = faceCenter.y + holeFace.getStepY() * 0.05D;
+                sz = faceCenter.z + holeFace.getStepZ() * 0.05D;
+            }
             float worldSurface = (float) (wy + (surface - by));
             // 进水方向 = 洞口朝舱内的水平方向；粒子主轴沿它，再加一个垂直方向的散射锥。
             float perpX = -dirZ;
@@ -920,9 +942,9 @@ public final class ShipWaterRenderer {
                     double side = (level.random.nextDouble() - 0.5D) * 0.16D;
                     double forward = 0.22D + level.random.nextDouble() * 0.16D;
                     level.addParticle(ParticleTypes.CLOUD,
-                            wx + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            wy + (level.random.nextDouble() - 0.5D) * 0.24D,
-                            wz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sx + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sy + (level.random.nextDouble() - 0.5D) * 0.24D,
+                            sz + (level.random.nextDouble() - 0.5D) * 0.30D,
                             carryX + dirX * forward + perpX * side
                                     + (level.random.nextDouble() - 0.5D) * 0.04D,
                             carryY - 0.10D - level.random.nextDouble() * 0.14D,
@@ -952,9 +974,9 @@ public final class ShipWaterRenderer {
                             ? -0.80D - level.random.nextDouble() * 0.40D
                             : 0.18D + level.random.nextDouble() * 0.28D;
                     level.addParticle(ModParticles.SHIP_BUBBLE.get(),
-                            wx + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            wy + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            wz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sx + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sy + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sz + (level.random.nextDouble() - 0.5D) * 0.30D,
                             dirX * forward + perpX * side
                                     + (level.random.nextDouble() - 0.5D) * 0.03D,
                             vy,

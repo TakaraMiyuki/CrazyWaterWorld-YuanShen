@@ -12,7 +12,7 @@ edges:
     condition: when a block finally breaks and you need to verify breach inflow
   - target: patterns/vs2-physical-ship.md
     condition: when the ship is a VS2 physical ship
-last_updated: 2026-11-04
+last_updated: 2026-11-05
 mex:
   id: mx_01M6GX58H7XEYC0Q58QBFE0FMY
   type: pattern
@@ -79,6 +79,8 @@ mex:
 - 世界条是不写深度的半透明 `RenderType`；如果条被水面/粒子整片盖住，检查 `BarRenderType` 的 `WriteMaskStateShard(true,false)`。
 - 0% 的条是**整条亮红**（0.95/0.12/0.10）；暗红 (0.55,0.04,0.04) 深水下看着就是黑的。部分血量的填充有最小可见宽度（条宽的 12%）。
 - 血条数值异常（黑框黑槽无填充）只可能来自非有限值：`HullDamage.applyDamage/setHealth`、`ShipHullDamagePacket.build`、`HullDamageRenderer.targets` 都有 NaN 防护；每格首次出现血条会打 `[hull-bar] pos=... health=... bits=...`，出问题时先看这行。
+- **裂痕看不见，按这两个根因查**（issue #14，2026-11-05 修）：① `HullDamageRenderer.drawCrackCube` 的面绕序——crumbling RenderType 开背面剔除，法线朝内的面整面被剔（顶面曾因坐标顺序发成 -Y，舱内永远看不到舱顶裂痕）；现绕序集中在 `FACE_CORNERS` 表里，全部叉积验证过，改面别再手写六组坐标。② 被实心邻居盖住的面：贴面外扩 0.003 会伸进邻居体积被深度测试挡死——现在露出面外扩 0.003、被盖面画共面（LEQUAL + 地形后绘制，与原版破坏叠加层同机制）。判断用 `ShipCellFaces.isFaceCovered`（船局部坐标查邻居，方块船/物理船同一份代码）。
+- **水花/气泡看不见**：粒子不能从破口格中心喷（0% 破口方块仍渲染成实心，会挡住自己）；`spawnLeakParticles`/`spawnBreachWater` 都改用 `ShipCellFaces.pickVisibleFace` 贴"未盖住且最朝向相机"的面。竖直破口的服务端法线是 (0,0)（`ShipWaterStateBuilder.breachNormal`），靠客户端选面兜底，不依赖它。
 
 ## Verify
 
