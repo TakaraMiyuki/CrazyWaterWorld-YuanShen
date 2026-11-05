@@ -611,15 +611,24 @@ public final class ShipWaterRenderer {
             return new WaterStats(0, 0, 0);
         }
         Matrix4d toCamera;
+        BlockPos packetToShipyard;
         if (data.physical()) {
             if (ship == null) {
                 return new WaterStats(0, 0, 0);
             }
             toCamera = waterToCamera(ship, cameraPos, data);
+            // 船坞偏移 = positionInShip − anchor 取整：邻居查询必须用船坞坐标
+            // （包坐标是装配原坐标，issue #15 review）
+            Vector3dc pis = ship.getRenderTransform().getPositionInShip();
+            packetToShipyard = new BlockPos(
+                    (int) Math.round(pis.x() - data.anchorX()),
+                    (int) Math.round(pis.y() - data.anchorY()),
+                    (int) Math.round(pis.z() - data.anchorZ()));
         } else {
             // 方块船没有 render transform：世界坐标 = 装配原坐标 + 整数位移。
             toCamera = new Matrix4d().translation(
                     dx - cameraPos.x, dy - cameraPos.y, dz - cameraPos.z);
+            packetToShipyard = BlockPos.containing(dx, dy, dz);
         }
 
         PoseStack pose = event.getPoseStack();
@@ -775,8 +784,8 @@ public final class ShipWaterRenderer {
                 carryY = (float) (velocity.y() / 20.0D);
                 carryZ = (float) (velocity.z() / 20.0D);
             }
-            spawnBreachWater(level, toCamera, cameraPos, data.breaches(), data.boxes(), boxes,
-                    carryX, carryY, carryZ);
+            spawnBreachWater(level, toCamera, packetToShipyard, cameraPos, data.breaches(),
+                    data.boxes(), boxes, carryX, carryY, carryZ);
         }
         if (quads > 0) {
             // 不再手动 disableCull/depthMask：debugQuads 的 state shard 已明确是
@@ -847,8 +856,8 @@ public final class ShipWaterRenderer {
      *
      * <p>两种都只在“水面还在涨”时生成；每次总量有上限，避免破口很多时粒子爆量。</p>
      */
-    private static void spawnBreachWater(ClientLevel level, Matrix4d toCamera, Vec3 cameraPos,
-                                         float[] breaches, float[] target, float[] boxes,
+    private static void spawnBreachWater(ClientLevel level, Matrix4d toCamera, BlockPos packetToShipyard,
+                                         Vec3 cameraPos, float[] breaches, float[] target, float[] boxes,
                                          float carryX, float carryY, float carryZ) {
         if (level == null || breaches.length < 8) {
             return;
@@ -913,23 +922,35 @@ public final class ShipWaterRenderer {
             double wz = cameraPos.z + WATER_SCRATCH.z;
             // 粒子不能从破口格"中心"喷：0% 破口方块仍然渲染成实心，中心生成的
             // 粒子整片被自己的方块挡住（issue #14）。贴到洞口所在的面上——
-            // 即未被实心邻居盖住、且最朝向相机的那一面。
+            // 即未被实心邻居盖住、且最朝向相机的那一面。邻居查询用船坞坐标
+            // （包坐标 + packetToShipyard，issue #15 review）。
             BlockPos breachCell = BlockPos.containing(bx, by, bz);
             Matrix4d breachToWorld = new Matrix4d()
                     .translation(cameraPos.x, cameraPos.y, cameraPos.z)
                     .mul(toCamera);
-            Direction holeFace = ShipCellFaces.pickVisibleFace(level, breachCell, breachToWorld, cameraPos);
+            Direction holeFace = ShipCellFaces.pickVisibleFace(level, breachCell, packetToShipyard,
+                    breachToWorld, cameraPos);
             double sx = wx;
             double sy = wy;
             double sz = wz;
+            Vector3d holeWorldNormal = null;
             if (holeFace != null) {
                 Vector3d faceCenter = breachToWorld.transformPosition(new Vector3d(
                         breachCell.getX() + 0.5D + holeFace.getStepX() * 0.5D,
                         breachCell.getY() + 0.5D + holeFace.getStepY() * 0.5D,
                         breachCell.getZ() + 0.5D + holeFace.getStepZ() * 0.5D), new Vector3d());
-                sx = faceCenter.x + holeFace.getStepX() * 0.05D;
-                sy = faceCenter.y + holeFace.getStepY() * 0.05D;
-                sz = faceCenter.z + holeFace.getStepZ() * 0.05D;
+                // 世界空间法线走 transformDirection（物理船带倾斜时局部 ≠ 世界）
+                holeWorldNormal = breachToWorld.transformDirection(
+                        new Vector3d(holeFace.getStepX(), holeFace.getStepY(), holeFace.getStepZ()),
+                        new Vector3d());
+                if (holeWorldNormal.lengthSquared() > 1.0E-8D) {
+                    holeWorldNormal.normalize();
+                } else {
+                    holeWorldNormal.set(holeFace.getStepX(), holeFace.getStepY(), holeFace.getStepZ());
+                }
+                sx = faceCenter.x + holeWorldNormal.x * 0.05D;
+                sy = faceCenter.y + holeWorldNormal.y * 0.05D;
+                sz = faceCenter.z + holeWorldNormal.z * 0.05D;
             }
             float worldSurface = (float) (wy + (surface - by));
             // 进水方向 = 洞口朝舱内的水平方向；粒子主轴沿它，再加一个垂直方向的散射锥。
@@ -941,10 +962,18 @@ public final class ShipWaterRenderer {
                 for (int c = 0; c < perHole && budget-- > 0; c++) {
                     double side = (level.random.nextDouble() - 0.5D) * 0.16D;
                     double forward = 0.22D + level.random.nextDouble() * 0.16D;
+                    double ox = (level.random.nextDouble() - 0.5D) * 0.30D;
+                    double oy = (level.random.nextDouble() - 0.5D) * 0.24D;
+                    double oz = (level.random.nextDouble() - 0.5D) * 0.30D;
+                    if (holeWorldNormal != null) {
+                        // 位置散射投影到洞口面切平面：防止倾斜船体上粒子被抖回方块里
+                        double dot = ox * holeWorldNormal.x + oy * holeWorldNormal.y + oz * holeWorldNormal.z;
+                        ox -= dot * holeWorldNormal.x;
+                        oy -= dot * holeWorldNormal.y;
+                        oz -= dot * holeWorldNormal.z;
+                    }
                     level.addParticle(ParticleTypes.CLOUD,
-                            sx + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            sy + (level.random.nextDouble() - 0.5D) * 0.24D,
-                            sz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sx + ox, sy + oy, sz + oz,
                             carryX + dirX * forward + perpX * side
                                     + (level.random.nextDouble() - 0.5D) * 0.04D,
                             carryY - 0.10D - level.random.nextDouble() * 0.14D,
@@ -973,10 +1002,17 @@ public final class ShipWaterRenderer {
                     double vy = highBreach
                             ? -0.80D - level.random.nextDouble() * 0.40D
                             : 0.18D + level.random.nextDouble() * 0.28D;
+                    double ox = (level.random.nextDouble() - 0.5D) * 0.30D;
+                    double oy = (level.random.nextDouble() - 0.5D) * 0.30D;
+                    double oz = (level.random.nextDouble() - 0.5D) * 0.30D;
+                    if (holeWorldNormal != null) {
+                        double dot = ox * holeWorldNormal.x + oy * holeWorldNormal.y + oz * holeWorldNormal.z;
+                        ox -= dot * holeWorldNormal.x;
+                        oy -= dot * holeWorldNormal.y;
+                        oz -= dot * holeWorldNormal.z;
+                    }
                     level.addParticle(ModParticles.SHIP_BUBBLE.get(),
-                            sx + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            sy + (level.random.nextDouble() - 0.5D) * 0.30D,
-                            sz + (level.random.nextDouble() - 0.5D) * 0.30D,
+                            sx + ox, sy + oy, sz + oz,
                             dirX * forward + perpX * side
                                     + (level.random.nextDouble() - 0.5D) * 0.03D,
                             vy,

@@ -31,6 +31,7 @@ import org.joml.Matrix4d;
 import org.joml.Matrix4f;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
+import org.jetbrains.annotations.Nullable;
 import org.valkyrienskies.core.api.ships.ClientShip;
 import org.valkyrienskies.core.api.ships.properties.ShipTransform;
 
@@ -89,15 +90,26 @@ public final class HullDamageRenderer {
     }
 
     public static List<Target> targets(ClientLevel level, Vec3 cameraPos) {
-        Matrix4d toWorld = resolveToWorld(level, data);
-        return toWorld == null ? List.of() : targets(cameraPos, toWorld);
+        ShipMapping mapping = resolveMapping(level, data);
+        return mapping == null ? List.of() : targets(cameraPos, mapping.toWorld());
     }
 
-    /** 把当前包里的格子映射到世界坐标；物理船找不到 render 船时返回 null。 */
-    private static Matrix4d resolveToWorld(ClientLevel level, ShipHullDamagePacket snapshot) {
+    /** 包坐标 → 世界坐标的映射 + 船坞偏移（邻居查询用，见 {@link ShipCellFaces}）。 */
+    private record ShipMapping(Matrix4d toWorld, BlockPos yardOffset) {
+    }
+
+    /**
+     * 解析当前包的渲染映射；物理船找不到 render 船时返回 null。
+     *
+     * <p>船坞偏移 = {@code positionInShip − anchor} 取整：包坐标是装配原坐标，
+     * 船坞里的方块在 包坐标 + 该偏移 处（issue #15 review 指出，邻居查询必须用）。</p>
+     */
+    @Nullable
+    private static ShipMapping resolveMapping(ClientLevel level, ShipHullDamagePacket snapshot) {
         Matrix4d toWorld = new Matrix4d();
         if (!snapshot.physical()) {
-            return toWorld;
+            // 方块船：耐久位置随 ShipMover 一起 shift，包坐标 = 当前世界坐标，零偏移
+            return new ShipMapping(toWorld, BlockPos.ZERO);
         }
         if (snapshot.shipId() < 0L) {
             return null;
@@ -109,10 +121,12 @@ public final class HullDamageRenderer {
         ShipTransform transform = ship.getRenderTransform();
         toWorld.set(transform.getShipToWorld());
         Vector3dc positionInShip = transform.getPositionInShip();
-        toWorld.translate(positionInShip.x() - snapshot.anchorX(),
-                positionInShip.y() - snapshot.anchorY(),
-                positionInShip.z() - snapshot.anchorZ());
-        return toWorld;
+        double dx = positionInShip.x() - snapshot.anchorX();
+        double dy = positionInShip.y() - snapshot.anchorY();
+        double dz = positionInShip.z() - snapshot.anchorZ();
+        toWorld.translate(dx, dy, dz);
+        return new ShipMapping(toWorld, new BlockPos(
+                (int) Math.round(dx), (int) Math.round(dy), (int) Math.round(dz)));
     }
 
     private static List<Target> targets(Vec3 cameraPos, Matrix4d toWorld) {
@@ -157,11 +171,11 @@ public final class HullDamageRenderer {
         }
         Camera camera = event.getCamera();
         Vec3 cameraPos = camera.getPosition();
-        Matrix4d toWorld = resolveToWorld(level, data);
-        if (toWorld == null) {
+        ShipMapping mapping = resolveMapping(level, data);
+        if (mapping == null) {
             return;
         }
-        List<Target> targets = targets(cameraPos, toWorld);
+        List<Target> targets = targets(cameraPos, mapping.toWorld());
         if (targets.isEmpty()) {
             return;
         }
@@ -172,9 +186,9 @@ public final class HullDamageRenderer {
         PoseStack pose = event.getPoseStack();
         Matrix4f matrix = pose.last().pose();
 
-        drawCracks(mc, level, matrix, targets, toWorld, cameraPos);
+        drawCracks(mc, level, matrix, targets, mapping, cameraPos);
         drawBars(mc, camera, matrix, targets, cameraPos);
-        spawnLeakParticles(level, targets, cameraPos, toWorld);
+        spawnLeakParticles(level, targets, cameraPos, mapping);
     }
 
     // ------------------------------------------------------------------ 裂痕
@@ -192,7 +206,7 @@ public final class HullDamageRenderer {
             MultiBufferSource.immediate(BAR_BUILDER);
 
     private static void drawCracks(Minecraft mc, ClientLevel level, Matrix4f matrix, List<Target> targets,
-                                   Matrix4d toWorld, Vec3 cameraPos) {
+                                   ShipMapping mapping, Vec3 cameraPos) {
         VertexConsumer vertices = CRACK_BUFFERS.getBuffer(CRACK_TYPE);
         for (Target target : targets) {
             float health = Mth.clamp(target.health(), 0.0F, 1.0F);
@@ -200,7 +214,7 @@ public final class HullDamageRenderer {
                 continue;
             }
             int stage = Mth.clamp((int) Math.ceil((1.0F - health) * 9.0F), 1, 9);
-            drawCrackCube(level, vertices, matrix, target.pos(), toWorld, cameraPos, crackSprite(stage));
+            drawCrackCube(level, vertices, matrix, target.pos(), mapping, cameraPos, crackSprite(stage));
         }
         // 必须无条件 endBatch（空批次会被 discard）：复用的 builder 若留在 begun 状态，
         // 下一帧 getBuffer 会继续往里累积，顶点坐标跨帧错乱。
@@ -231,10 +245,10 @@ public final class HullDamageRenderer {
      * 绕序按叉积逐面验证过（从方块外看逆时针），不再手写六组坐标。</p>
      */
     private static void drawCrackCube(ClientLevel level, VertexConsumer vertices, Matrix4f matrix,
-                                      BlockPos pos, Matrix4d toWorld, Vec3 cameraPos,
+                                      BlockPos pos, ShipMapping mapping, Vec3 cameraPos,
                                       TextureAtlasSprite sprite) {
         for (Direction dir : Direction.values()) {
-            boolean covered = ShipCellFaces.isFaceCovered(level, pos, dir);
+            boolean covered = ShipCellFaces.isFaceCovered(level, pos, mapping.yardOffset(), dir);
             double inflate = covered ? 0.0D : 0.003D;
             // 面所在平面的坐标：露出时向方块外抬 0.003，被盖住时贴齐方块边界
             double fx = pos.getX() + 0.5D + dir.getStepX() * (0.5D + inflate);
@@ -275,7 +289,7 @@ public final class HullDamageRenderer {
                 double cz = axisValue(dir, corner[2], minZ, fz, maxZ);
                 float u = corner[3] == 0 ? sprite.getU0() : sprite.getU1();
                 float v = corner[4] == 0 ? sprite.getV0() : sprite.getV1();
-                crackVertex(vertices, matrix, toWorld, cameraPos, cx, cy, cz, u, v);
+                crackVertex(vertices, matrix, mapping.toWorld(), cameraPos, cx, cy, cz, u, v);
             }
         }
     }
@@ -457,11 +471,12 @@ public final class HullDamageRenderer {
     // ------------------------------------------------------------------ 水花
 
     private static void spawnLeakParticles(ClientLevel level, List<Target> targets, Vec3 cameraPos,
-                                           Matrix4d toWorld) {
+                                           ShipMapping mapping) {
         // 5 Hz 检查，实际每个泄漏点每 0.5 秒喷 1~4 个水花。
         if (level.getGameTime() % 10L != 0L) {
             return;
         }
+        Matrix4d toWorld = mapping.toWorld();
         for (Target target : targets) {
             if (target.leak() <= 0.0F) {
                 continue;
@@ -469,15 +484,26 @@ public final class HullDamageRenderer {
             // 贴"未被实心邻居盖住、且最朝向相机"的面（issue #14）：旧的相机侧 AABB
             // 放置会把粒子放进相邻实心方块的体积里，某些朝向整片被挡。
             Vec3 at = null;
-            Direction face = ShipCellFaces.pickVisibleFace(level, target.pos(), toWorld, cameraPos);
+            Vector3d worldNormal = null;
+            Direction face = ShipCellFaces.pickVisibleFace(level, target.pos(),
+                    mapping.yardOffset(), toWorld, cameraPos);
             if (face != null) {
                 Vector3d faceCenter = toWorld.transformPosition(new Vector3d(
                         target.pos().getX() + 0.5D + face.getStepX() * 0.5D,
                         target.pos().getY() + 0.5D + face.getStepY() * 0.5D,
                         target.pos().getZ() + 0.5D + face.getStepZ() * 0.5D), new Vector3d());
-                at = new Vec3(faceCenter.x + face.getStepX() * 0.06D,
-                        faceCenter.y + face.getStepY() * 0.06D,
-                        faceCenter.z + face.getStepZ() * 0.06D);
+                // 世界空间法线（render 变换的线性部分）：物理船带轻微物理倾斜时
+                // 局部法线 ≠ 世界法线，散射/外扩都要沿它算（issue #15 review）。
+                worldNormal = toWorld.transformDirection(
+                        new Vector3d(face.getStepX(), face.getStepY(), face.getStepZ()), new Vector3d());
+                if (worldNormal.lengthSquared() > 1.0E-8D) {
+                    worldNormal.normalize();
+                } else {
+                    worldNormal.set(face.getStepX(), face.getStepY(), face.getStepZ());
+                }
+                at = new Vec3(faceCenter.x + worldNormal.x * 0.06D,
+                        faceCenter.y + worldNormal.y * 0.06D,
+                        faceCenter.z + worldNormal.z * 0.06D);
             } else {
                 // 六面全被盖住（嵌墙格）：退回旧的相机侧放置，聊胜于无
                 Vec3 towardCamera = cameraPos.subtract(target.center());
@@ -494,6 +520,16 @@ public final class HullDamageRenderer {
                 double ox = (level.random.nextDouble() - 0.5D) * 0.30D;
                 double oy = (level.random.nextDouble() - 0.5D) * 0.30D;
                 double oz = (level.random.nextDouble() - 0.5D) * 0.30D;
+                if (worldNormal != null) {
+                    // 散射去掉向内的分量：物理船倾斜时世界法线 ≠ 轴对齐，
+                    // 轴对齐抖动会把粒子推进方块体积里（issue #15 review）。
+                    double inward = ox * worldNormal.x + oy * worldNormal.y + oz * worldNormal.z;
+                    if (inward < 0.0D) {
+                        ox -= inward * worldNormal.x;
+                        oy -= inward * worldNormal.y;
+                        oz -= inward * worldNormal.z;
+                    }
+                }
                 level.addParticle(ParticleTypes.SPLASH,
                         at.x + ox, at.y + oy, at.z + oz,
                         (level.random.nextDouble() - 0.5D) * 0.05D,
