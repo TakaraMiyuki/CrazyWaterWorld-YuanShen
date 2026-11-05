@@ -506,6 +506,12 @@ public final class HullDamageRenderer {
     /**
      * 不写深度的半透明条 RenderType，和水面同一套参数；这样船内水/粒子不会把条
      * 整片盖掉，但条仍然会被真正在它前面的方块挡住。
+     *
+     * <p><strong>sortOnUpload 必须关</strong>（issue #14 验收发现）：开启后半透明
+     * 四边形会按中心距离重排，而血条的三层（描边/底槽/彩色填充）共面、填充层中心
+     * 还因左对齐偏移挪了位置——斜视角下填充层排到深灰底槽之前绘制，90% 不透明的
+     * 近黑底槽把它盖掉，血条整体发黑；视角一变距离关系翻转，时好时坏。关掉排序
+     * 让三层按写入顺序（描边→底槽→填充）确定性叠加。</p>
      */
     private static final class BarRenderType extends RenderStateShard {
 
@@ -521,7 +527,7 @@ public final class HullDamageRenderer {
                 VertexFormat.Mode.QUADS,
                 256,
                 false,
-                true,
+                false,
                 RenderType.CompositeState.builder()
                         .setShaderState(new ShaderStateShard(GameRenderer::getPositionColorShader))
                         .setTransparencyState(TRANSLUCENT_TRANSPARENCY)
